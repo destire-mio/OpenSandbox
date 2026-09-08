@@ -34,7 +34,7 @@ Existing clients retain their current command SSE and PTY JSON behavior; their p
 
 ## Proposal
 
-Add `/command/operations` and `/pty/operations` create routes with required `operation_id`, `GET /execution/instance` to obtain server scope/time, and a private `GET /execution/operation?kind=...` lookup with `X-EXECD-OPERATION-ID` header. These new routes return JSON creation acknowledgement; the existing command route remains SSE. High-level SDK methods are distinct from ordinary streaming `run`, preventing accidental interpretation as a completed execution.
+Add `/command/operations` and `/pty/operations` create routes with required `operation_id`, `GET /execution/instance` to obtain server scope/time, and a private `GET /execution/operation?kind=...` lookup with `X-EXECD-OPERATION-ID` header. These new routes return JSON creation acknowledgement; the existing command route remains SSE. High-level SDK methods are distinct from ordinary streaming `run`, preventing accidental interpretation as a completed execution. JavaScript and Python expose recovery as an optional capability so existing third-party command implementations remain source-compatible.
 
 The full protocol, errors, field normalization, lifecycle cases and SDK method mapping are in [the recovery guide](../docs/guides/execution-creation-recovery.md) and [the source spec](../specs/execd-api.yaml).
 

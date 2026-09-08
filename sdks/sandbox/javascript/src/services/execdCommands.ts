@@ -1,4 +1,3 @@
-import type { ExecutionInstance, ExecutionOperation } from "../models/execd.js";
 // Copyright 2026 Alibaba Group Holding Ltd.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,6 +12,7 @@ import type { ExecutionInstance, ExecutionOperation } from "../models/execd.js";
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import type { ExecutionInstance, ExecutionOperation } from "../models/execd.js";
 import type { ExecutionHandlers } from "../models/execution.js";
 import type {
   CommandExecution,
@@ -23,11 +23,6 @@ import type {
 } from "../models/execd.js";
 
 export interface ExecdCommands {
-  getExecutionInstance(): Promise<ExecutionInstance>;
-  getExecutionOperation(kind: "command" | "pty", operationId: string): Promise<ExecutionOperation>;
-  createCommandOperation(operationId: string, command: string, opts?: RunCommandOpts): Promise<ExecutionOperation>;
-  createPTYOperation(operationId: string, opts?: { cwd?: string; command?: string }): Promise<ExecutionOperation>;
-
   /**
    * Run a command and stream server events (SSE). This is the lowest-level API.
    */
@@ -80,4 +75,23 @@ export interface ExecdCommands {
    * Delete a bash session by ID. Frees resources; session ID must have been returned by createSession.
    */
   deleteSession(sessionId: string): Promise<void>;
+}
+
+/** Optional creation recovery capability; legacy command implementations remain valid. */
+export interface ExecutionOperations {
+  getExecutionInstance(): Promise<ExecutionInstance>;
+  getExecutionOperation(kind: "command" | "pty", operationId: string): Promise<ExecutionOperation>;
+  createCommandOperation(operationId: string, command: string, opts?: RunCommandOpts): Promise<ExecutionOperation>;
+  createPTYOperation(operationId: string, opts?: { cwd?: string; command?: string }): Promise<ExecutionOperation>;
+}
+
+export function getExecutionOperations(commands: ExecdCommands): ExecutionOperations {
+  const candidate = commands as ExecdCommands & Partial<ExecutionOperations>;
+  if (typeof candidate.getExecutionInstance !== "function" ||
+      typeof candidate.getExecutionOperation !== "function" ||
+      typeof candidate.createCommandOperation !== "function" ||
+      typeof candidate.createPTYOperation !== "function") {
+    throw new TypeError("Command adapter does not support execution creation recovery");
+  }
+  return candidate as ExecdCommands & ExecutionOperations;
 }

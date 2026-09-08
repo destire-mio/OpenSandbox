@@ -25,7 +25,7 @@ import type {
   RunCommandOpts,
   ServerStreamEvent,
 } from "../models/execd.js";
-import type { ExecdCommands } from "../services/execdCommands.js";
+import type { ExecdCommands, ExecutionOperations } from "../services/execdCommands.js";
 import type { ExecutionHandlers } from "../models/execution.js";
 import { ExecutionEventDispatcher } from "../models/executionEventDispatcher.js";
 
@@ -133,7 +133,7 @@ export interface CommandsAdapterOptions {
   headers?: Record<string, string>;
 }
 
-export class CommandsAdapter implements ExecdCommands {
+export class CommandsAdapter implements ExecdCommands, ExecutionOperations {
   private readonly fetch: typeof fetch;
 
   constructor(

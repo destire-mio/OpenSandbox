@@ -115,7 +115,8 @@ export type {
   SandboxMetrics,
   PingResponse,
 } from "./models/execd.js";
-export type { ExecdCommands } from "./services/execdCommands.js";
+export { getExecutionOperations } from "./services/execdCommands.js";
+export type { ExecdCommands, ExecutionOperations } from "./services/execdCommands.js";
 
 export type {
   Execution,

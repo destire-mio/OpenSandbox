@@ -39,7 +39,7 @@ func (c *basicController) decodeCreation(target any, callerBound bool) error {
 		return c.bindJSON(target)
 	}
 	var raw json.RawMessage
-	source := json.NewDecoder(c.ctx.Request.Body)
+	source := json.NewDecoder(http.MaxBytesReader(c.ctx.Writer, c.ctx.Request.Body, 1<<20))
 	err := source.Decode(&raw)
 	if err != nil {
 		if errors.Is(err, io.EOF) {

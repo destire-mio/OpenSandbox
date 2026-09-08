@@ -167,6 +167,13 @@ func accessTokenMiddleware(token string) gin.HandlerFunc {
 
 		requestedToken := ctx.GetHeader(model.ApiAccessTokenHeader)
 		if requestedToken == "" || requestedToken != token {
+			switch ctx.Request.URL.Path {
+			case "/execution/instance", "/execution/operation", "/command/operations", "/pty/operations":
+				ctx.AbortWithStatusJSON(http.StatusUnauthorized, model.ErrorResponse{
+					Code: model.ErrorCode("UNAUTHORIZED"), Message: "Invalid or missing execd access token",
+				})
+				return
+			}
 			ctx.AbortWithStatusJSON(http.StatusUnauthorized, map[string]any{
 				"error": "Unauthorized: invalid or missing header " + model.ApiAccessTokenHeader,
 			})

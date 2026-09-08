@@ -587,3 +587,30 @@ func TestOperationDaemonHTTP(t *testing.T) {
 	require.Len(t, strings.Fields(string(b)), 1)
 	t.Log("daemon restart rejected old identity; no second process")
 }
+
+func TestOperationAuthenticationErrorContract(t *testing.T) {
+	router := NewRouter("test-token")
+	for _, token := range []string{"", "wrong-token"} {
+		for _, path := range []string{"/execution/instance", "/execution/operation?kind=command", "/command/operations", "/pty/operations", "/command", "/pty"} {
+			req := httptest.NewRequest("POST", path, strings.NewReader(`{}`))
+			if strings.HasPrefix(path, "/execution/") {
+				req.Method = "GET"
+			}
+			req.Header.Set("X-EXECD-ACCESS-TOKEN", token)
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+			require.Equal(t, 401, w.Code)
+			var body map[string]string
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+			if path == "/command" || path == "/pty" {
+				require.Contains(t, body, "error")
+				require.NotContains(t, body, "code")
+			} else {
+				require.Equal(t, "UNAUTHORIZED", body["code"])
+				require.NotEmpty(t, body["message"])
+				require.NotContains(t, body, "error")
+			}
+			require.NotContains(t, w.Body.String(), "test-token")
+		}
+	}
+}

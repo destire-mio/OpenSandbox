@@ -15,7 +15,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { CommandsAdapter, createExecdClient } from "../dist/internal.js";
-import { newOperationId, SandboxApiException } from "../dist/index.js";
+import { newOperationId, SandboxApiException, getExecutionOperations } from "../dist/index.js";
 
 test("operation requests preserve identity, map fields, and do not claim execution success", async () => {
   const requests = [];
@@ -37,7 +37,8 @@ test("operation requests preserve identity, map fields, and do not claim executi
   };
   const client = createExecdClient({ baseUrl: "http://localhost:44772", fetch: fetchImpl });
   const adapter = new CommandsAdapter(client, { baseUrl: "http://localhost:44772", fetch: fetchImpl });
-  const instance = await adapter.getExecutionInstance();
+  assert.equal(getExecutionOperations(adapter), adapter);
+  const instance = await getExecutionOperations(adapter).getExecutionInstance();
   assert.match(newOperationId(instance), /^scope\.123\.[a-f0-9]{32}$/);
   const op = await adapter.createCommandOperation("scope.123.persisted", "echo hello", { workingDirectory: "/tmp", timeoutSeconds: 2, envs: { A: "value" } });
   assert.equal(op.state, "creating");
@@ -45,4 +46,14 @@ test("operation requests preserve identity, map fields, and do not claim executi
   assert.equal((await adapter.createPTYOperation("scope.123.persisted", { cwd: "/tmp", command: "echo hello" })).id, op.id);
   await assert.rejects(adapter.getExecutionOperation("pty", "scope.123.persisted"), SandboxApiException);
   assert.equal(requests.length, 5);
+});
+
+
+test("legacy adapters retain type compatibility and recovery is optional", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  execFileSync(process.execPath, [fileURLToPath(new URL("../node_modules/typescript/bin/tsc", import.meta.url)),
+    "--noEmit", "--strict", "--skipLibCheck", "--target", "ES2022", "--module", "NodeNext", "--moduleResolution", "NodeNext",
+    fileURLToPath(new URL("./legacy-commands.mts", import.meta.url))]);
+  assert.throws(() => getExecutionOperations({}), /does not support/);
 });

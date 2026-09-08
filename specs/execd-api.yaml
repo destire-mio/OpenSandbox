@@ -410,6 +410,10 @@ paths:
                 $ref: '#/components/schemas/ExecutionInstance'
         '401':
           description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /execution/operation:
     get:
       summary: Recover an execution creation by operation identity

@@ -60,11 +60,21 @@ choose background mode in the saved request. Ordinary `/command` requests retain
 
 | SDK | Scope and identity | Creation and reconciliation |
 | --- | --- | --- |
-| Python async/sync `sandbox.commands` | `get_execution_instance()`, `instance.new_operation_id()` | `create_command_operation(id, command, opts=...)`, `create_pty_operation(id, cwd=..., command=...)`, `get_execution_operation(kind, id)` |
-| JavaScript `sandbox.commands` | `getExecutionInstance()`, exported `newOperationId(instance)` | `createCommandOperation(id, command, opts)`, `createPTYOperation(id, opts)`, `getExecutionOperation(kind, id)` |
+| Python async/sync recovery capability | `get_execution_instance()`, `instance.new_operation_id()` | `create_command_operation(id, command, opts=...)`, `create_pty_operation(id, cwd=..., command=...)`, `get_execution_operation(kind, id)` |
+| JavaScript recovery capability | `getExecutionInstance()`, exported `newOperationId(instance)` | `createCommandOperation(id, command, opts)`, `createPTYOperation(id, opts)`, `getExecutionOperation(kind, id)` |
 | Go `ExecdClient` | `GetExecutionInstance(ctx)`, `instance.NewOperationID()` | `CreateCommandOperation(ctx, id, request)`, `CreatePTYOperation(ctx, id, cwd, command)`, `GetExecutionOperation(ctx, kind, id)` |
 | Kotlin `Commands` | `getExecutionInstance()`, `instance.newOperationId()` | `createCommandOperation(id, request)`, `createPTYOperation(id, cwd, command)`, `getExecutionOperation(kind, id)` |
 | C# `IExecdCommands` | `GetExecutionInstanceAsync()`, `instance.NewOperationId()` | `CreateCommandOperationAsync(id, command, options)`, `CreatePtyOperationAsync(id, cwd, command)`, `GetExecutionOperationAsync(kind, id)` |
+
+JavaScript obtains the optional capability with exported
+`getExecutionOperations(sandbox.commands)`. Python imports
+`get_execution_operations` from `opensandbox.services` (async) or
+`opensandbox.sync.services` (sync), then calls
+`operations = get_execution_operations(sandbox.commands)`. Use the returned
+capability for the methods in the table. The standard adapters support it; a legacy
+third-party adapter remains valid for ordinary commands and raises `TypeError` when
+asked for unsupported recovery. Existing command interfaces and factory return
+types do not require the recovery methods.
 
 These calls return a creation model, not the SDK's completed execution model. Save
 the operation ID before calling create. On recovery, load the saved ID; do not call
@@ -94,8 +104,11 @@ and PTY/pipe mode follow the existing first-WebSocket-launch behavior, not the P
 fingerprint; the first launch fixes those choices for that recovered session.
 
 Operation lookups expose no command, arguments, env, stdin, logs, output,
-fingerprint or caller identity. They are private lookups, not an inventory, and
-use `Cache-Control: no-store`, including authentication errors. For keyed commands,
+fingerprint or caller identity. Authentication failures on the four operation
+endpoints return HTTP 401 with `code: UNAUTHORIZED` and `message`; legacy endpoint
+authentication errors keep their existing shape. The 1 MiB body limit is applied
+to the input stream before JSON decoding, including trailing data. Operation
+lookups are private, not an inventory, and use `Cache-Control: no-store`, including authentication errors. For keyed commands,
 known-ID status omits command content and uses a generic runtime error description.
 
 ## Failure and recovery contract
