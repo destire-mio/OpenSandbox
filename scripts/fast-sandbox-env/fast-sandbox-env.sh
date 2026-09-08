@@ -343,6 +343,10 @@ ensure_tool() { # name
 	command -v "$name" >/dev/null 2>&1 || die "$name installation failed"
 }
 
+host_port_busy() { # port -> 0 when something already listens on 127.0.0.1:<port>
+	(exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+}
+
 preflight() {
 	[[ "$(uname -s)" == "Linux" ]] \
 		|| die "this environment requires a Linux host with KVM (run it on the remote development VM)"
@@ -361,6 +365,15 @@ preflight() {
 		die "docker cgroup Version is 1; kind requires cgroup v2. Enable it with the kernel cmdline 'systemd.unified_cgroup_hierarchy=1' and reboot"
 	fi
 	[[ -e /dev/kvm ]] || die "/dev/kvm is missing on this host (KVM required)"
+	# Fail fast on busy MinIO host ports instead of dying at the docker
+	# bind in stage 8. A common culprit is fast-sandbox's own
+	# integration-env.sh MinIO (container integration-env-minio).
+	local port
+	for port in "$MINIO_PORT" "$MINIO_CONSOLE_PORT"; do
+		if host_port_busy "$port"; then
+			die "127.0.0.1:$port is already in use (leftover MinIO? check 'docker ps' / 'ss -ltnp'); free it or set MINIO_PORT / MINIO_CONSOLE_PORT"
+		fi
+	done
 	docker pull -q "$MINIO_IMAGE" >/dev/null
 	docker pull -q minio/mc >/dev/null
 	pass "preflight"
