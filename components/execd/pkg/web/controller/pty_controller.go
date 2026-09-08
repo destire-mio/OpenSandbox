@@ -38,7 +38,11 @@ func NewPTYController(ctx *gin.Context) *PTYController {
 
 // CreatePTYSession handles POST /pty.
 // Creates a new PTY session and returns its session_id.
-func (c *PTYController) CreatePTYSession() {
+func (c *PTYController) CreatePTYSession() { c.createPTYSession(false) }
+
+func (c *PTYController) CreatePTYOperation() { c.createPTYSession(true) }
+
+func (c *PTYController) createPTYSession(callerBound bool) {
 	if !runtime.IsPTYSessionSupported() {
 		c.RespondError(
 			http.StatusNotImplemented,
@@ -49,12 +53,26 @@ func (c *PTYController) CreatePTYSession() {
 	}
 
 	var req model.CreatePTYSessionRequest
-	if err := c.bindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+	if err := c.decodeCreation(&req, callerBound); err != nil && (callerBound || !errors.Is(err, io.EOF)) {
 		c.RespondError(
 			http.StatusBadRequest,
 			model.ErrorCodeInvalidRequest,
 			fmt.Sprintf("error parsing request: %v", err),
 		)
+		return
+	}
+
+	if !callerBound {
+		req.OperationID = ""
+	}
+	if req.OperationID != "" {
+		if runner := c.operations(); runner != nil {
+			if c.ctx.Request.Context().Err() != nil {
+				return
+			}
+			op, err := runner.CreatePTYOperation(c.ctx.GetString("operationPrincipal"), req.OperationID, req.Cwd, req.Command)
+			c.operationResult(op, err)
+		}
 		return
 	}
 

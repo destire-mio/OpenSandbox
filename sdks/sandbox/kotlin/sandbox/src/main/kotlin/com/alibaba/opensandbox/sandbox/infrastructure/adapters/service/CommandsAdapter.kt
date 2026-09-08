@@ -24,12 +24,16 @@ import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ResponseType
 import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ServerError
 import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ServerException
 import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.Success
+import com.alibaba.opensandbox.sandbox.api.models.execd.CreateCommandOperationRequest
+import com.alibaba.opensandbox.sandbox.api.models.execd.CreatePTYOperationRequest
 import com.alibaba.opensandbox.sandbox.api.models.execd.EventNode
 import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.CommandLogs
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.CommandStatus
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.ExecutionHandlers
+import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.ExecutionInstance
+import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.ExecutionOperation
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.RunCommandRequest
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.RunInSessionRequest
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
@@ -49,6 +53,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import org.slf4j.LoggerFactory
 import com.alibaba.opensandbox.sandbox.api.models.execd.CreateSessionRequest as CreateSessionRequestApi
+import com.alibaba.opensandbox.sandbox.api.models.execd.ExecutionOperation as ApiExecutionOperation
 import com.alibaba.opensandbox.sandbox.api.models.execd.RunInSessionRequest as RunInSessionRequestApi
 
 /**
@@ -81,6 +86,67 @@ internal class CommandsAdapter(
             execdBaseUrl,
             execdApiClient,
         )
+
+    private fun ApiExecutionOperation.toOperation(): ExecutionOperation = ExecutionOperation(id, kind.value, state.value, expiresAt)
+
+    override fun getExecutionInstance(): ExecutionInstance {
+        try {
+            val instance = commandApi.getExecutionInstance()
+            return ExecutionInstance(instance.instanceId, instance.issuedAt, instance.retentionSeconds, instance.capacity)
+        } catch (e: Exception) {
+            throw e.toSandboxException()
+        }
+    }
+
+    override fun getExecutionOperation(
+        kind: String,
+        operationId: String,
+    ): ExecutionOperation {
+        try {
+            return commandApi.getExecutionOperation(CommandApi.KindGetExecutionOperation.valueOf(kind), operationId).toOperation()
+        } catch (e: Exception) {
+            throw e.toSandboxException()
+        }
+    }
+
+    override fun createCommandOperation(
+        operationId: String,
+        request: RunCommandRequest,
+    ): ExecutionOperation {
+        if (operationId.isBlank()) throw InvalidArgumentException("operationId is required")
+        try {
+            val original = request.toApiRunCommandRequest()
+            return commandApi.createCommandOperation(
+                CreateCommandOperationRequest(
+                    operationId = operationId,
+                    command = original.command,
+                    cwd = original.cwd,
+                    background = original.background,
+                    timeout = original.timeout,
+                    uid = original.uid,
+                    gid = original.gid,
+                    envs = original.envs,
+                ),
+            ).toOperation()
+        } catch (e: Exception) {
+            throw e.toSandboxException()
+        }
+    }
+
+    override fun createPTYOperation(
+        operationId: String,
+        cwd: String,
+        command: String,
+    ): ExecutionOperation {
+        if (operationId.isBlank()) throw InvalidArgumentException("operationId is required")
+        try {
+            return commandApi.createPTYOperation(
+                CreatePTYOperationRequest(operationId = operationId, cwd = cwd, command = command),
+            ).toOperation()
+        } catch (e: Exception) {
+            throw e.toSandboxException()
+        }
+    }
 
     override fun run(request: RunCommandRequest): Execution {
         if (request.command.isEmpty()) {

@@ -464,3 +464,7 @@ Set `EXECD_CLONE3_COMPAT` in sandbox env to force fallback behavior:
 ## License
 
 `execd` is part of OpenSandbox. See the [LICENSE](https://github.com/opensandbox-group/OpenSandbox/blob/main/LICENSE).
+
+## Experimental caller-bound creation
+
+See [Recovering execution creation](/guides/execution-creation-recovery) for the local proposal, command and PTY APIs, bounded retention, SDK entry points, and controller restart boundary.

@@ -29,6 +29,39 @@ namespace OpenSandbox.Tests;
 public class CommandsAdapterTests
 {
     [Fact]
+    public async Task ExecutionOperations_ShouldPreserveIdentityAndCreationState()
+    {
+        var calls = 0;
+        var adapter = CreateAdapter(new StubHttpMessageHandler(async (request, _) =>
+        {
+            calls++;
+            if (request.RequestUri!.AbsolutePath == "/execution/instance")
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"instance_id\":\"scope\",\"issued_at\":123,\"retention_seconds\":86400,\"capacity\":4096}") };
+            if (request.Method == HttpMethod.Post)
+            {
+                using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync());
+                body.RootElement.GetProperty("operation_id").GetString().Should().Be("scope.123.persisted");
+                body.RootElement.GetProperty("command").GetString().Should().Be("echo hello");
+                body.RootElement.GetProperty("cwd").GetString().Should().Be("/tmp");
+                if (request.RequestUri.AbsolutePath == "/command/operations")
+                    body.RootElement.GetProperty("timeout").GetInt64().Should().Be(2000);
+            }
+            else request.Headers.GetValues("X-EXECD-OPERATION-ID").Single().Should().Be("scope.123.persisted");
+            return new HttpResponseMessage(HttpStatusCode.Accepted)
+            {
+                Content = new StringContent("{\"id\":\"original\",\"kind\":\"command\",\"state\":\"creating\",\"expires_at\":\"2026-09-09T00:00:00Z\"}")
+            };
+        }));
+        var instance = await adapter.GetExecutionInstanceAsync();
+        instance.NewOperationId().Should().StartWith("scope.123.");
+        var operation = await adapter.CreateCommandOperationAsync("scope.123.persisted", "echo hello", new RunCommandOptions { WorkingDirectory = "/tmp", TimeoutSeconds = 2 });
+        operation.State.Should().Be("creating");
+        (await adapter.GetExecutionOperationAsync("command", "scope.123.persisted")).Id.Should().Be(operation.Id);
+        (await adapter.CreatePtyOperationAsync("scope.123.persisted", "/tmp", "echo hello")).Id.Should().Be(operation.Id);
+        calls.Should().Be(4);
+    }
+
+    [Fact]
     public async Task GetCommandStatusAsync_ShouldParseStatusResponse()
     {
         var httpHandler = new StubHttpMessageHandler((request, _) =>

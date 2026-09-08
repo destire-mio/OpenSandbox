@@ -70,6 +70,12 @@ func (c *Controller) GetCommandStatus(session string) (*CommandStatus, error) {
 		FinishedAt: kernel.finishedAt,
 		Content:    kernel.content,
 	}
+	if kernel.callerBound {
+		status.Content = ""
+		if status.Error != "" {
+			status.Error = "command failed; inspect execution output if retained"
+		}
+	}
 	return status, nil
 }
 

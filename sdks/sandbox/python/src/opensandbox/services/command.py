@@ -27,6 +27,8 @@ from opensandbox.models.execd import (
     CommandStatus,
     Execution,
     ExecutionHandlers,
+    ExecutionInstance,
+    ExecutionOperation,
     RunCommandOpts,
 )
 
@@ -166,4 +168,24 @@ class Commands(Protocol):
         Raises:
             SandboxException: if the operation fails.
         """
+        ...
+
+    async def get_execution_instance(self) -> ExecutionInstance:
+        """Obtain controller scope and server time before generating an identity."""
+        ...
+
+    async def get_execution_operation(self, kind: str, operation_id: str) -> ExecutionOperation:
+        """Look up creation only; an unknown execution outcome is not success."""
+        ...
+
+    async def create_command_operation(
+        self, operation_id: str, command: str, *, opts: RunCommandOpts | None = None,
+    ) -> ExecutionOperation:
+        """Use a persisted identity and immutable options. Does not stream output."""
+        ...
+
+    async def create_pty_operation(
+        self, operation_id: str, *, cwd: str = "", command: str = "",
+    ) -> ExecutionOperation:
+        """Create a dormant session or recover its original handle."""
         ...

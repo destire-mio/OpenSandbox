@@ -33,7 +33,6 @@ import (
 	"github.com/alibaba/opensandbox/internal/safego"
 
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
-	"github.com/alibaba/opensandbox/execd/pkg/log"
 	"github.com/alibaba/opensandbox/execd/pkg/util/pathutil"
 )
 
@@ -144,7 +143,7 @@ func buildCredential(uid, gid *uint32) (*syscall.Credential, error) {
 
 // runCommand executes shell commands and streams their output.
 func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest) error {
-	session := c.newContextID()
+	session := c.commandSessionID(request)
 
 	signals, stopSignals := subscribeCommandSignals()
 	defer stopSignals()
@@ -162,7 +161,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	}()
 
 	startAt := time.Now()
-	log.Info("received command: %v", log.SanitizeCommand(request.Code))
+	request.logCommandReceived()
 	// --noprofile/--norc are no-ops for `bash -c`, so shellCommand is not used here.
 	shell := getShell()
 	cmd := exec.CommandContext(ctx, shell, "-c", request.Code)
@@ -209,11 +208,12 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 			EValue:    err.Error(),
 			Traceback: []string{err.Error()},
 		})
-		log.Error("CommandExecError: error starting commands: %v", err)
+		request.logCommandError("starting", err)
 		return nil
 	}
 
 	kernel := &commandKernel{
+		callerBound:  request.commandID != "",
 		pid:          cmd.Process.Pid,
 		stdoutPath:   stdoutPath,
 		stderrPath:   stderrPath,
@@ -294,7 +294,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 			Traceback: traceback,
 		})
 
-		log.Error("CommandExecError: error running commands: %v", err)
+		request.logCommandError("running", err)
 		c.markCommandFinished(session, eCode, err.Error())
 		return nil
 	}
@@ -306,7 +306,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 
 // runBackgroundCommand executes shell commands in detached mode.
 func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.CancelFunc, request *ExecuteCodeRequest) error {
-	session := c.newContextID()
+	session := c.commandSessionID(request)
 	request.Hooks.OnExecuteInit(session)
 
 	pipe, err := c.combinedOutputDescriptor(session)
@@ -323,7 +323,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	defer stopSignals()
 
 	startAt := time.Now()
-	log.Info("received command: %v", log.SanitizeCommand(request.Code))
+	request.logCommandReceived()
 	// --noprofile/--norc are no-ops for `bash -c`, so shellCommand is not used here.
 	shell := getShell()
 	cmd := exec.CommandContext(ctx, shell, "-c", request.Code)
@@ -358,6 +358,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 
 	mp, err := launchManaged(cmd)
 	kernel := &commandKernel{
+		callerBound:  request.commandID != "",
 		pid:          -1,
 		stdoutPath:   stdoutPath,
 		stderrPath:   stderrPath,
@@ -368,7 +369,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	}
 	if err != nil {
 		cancel()
-		log.Error("CommandExecError: error starting commands: %v", err)
+		request.logCommandError("starting", err)
 		kernel.running = false
 		c.storeCommandKernel(session, kernel)
 		c.markCommandFinished(session, 255, err.Error())
@@ -388,7 +389,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 		err = mp.Wait()
 		cancel()
 		if err != nil {
-			log.Error("CommandExecError: error running commands: %v", err)
+			request.logCommandError("running", err)
 			exitCode := 1
 			var exitCodeErr exitCoder
 			if errors.As(err, &exitCodeErr) {

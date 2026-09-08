@@ -74,9 +74,11 @@ func NewPTYSessionID() string {
 //  4. The bash process exits → Done() closes → exit frame sent.
 //  5. Call close() to terminate an early session and release resources.
 type ptySession struct {
-	id      string
-	cwd     string
-	command string // optional custom command interpreted by the selected shell
+	callerBound    bool // immutable before publication
+	startAttempted bool // guarded by mu, including a failed launch
+	id             string
+	cwd            string
+	command        string // optional custom command interpreted by the selected shell
 
 	mu      sync.Mutex
 	closing bool
@@ -254,6 +256,9 @@ func (s *ptySession) StartPTY() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.callerBound && s.startAttempted {
+		return errors.New("caller-bound session launch was already attempted")
+	}
 	if s.pid != 0 {
 		return errors.New("pty session already started")
 	}
@@ -261,6 +266,7 @@ func (s *ptySession) StartPTY() error {
 		return errors.New("pty session is closing")
 	}
 
+	s.startAttempted = true
 	cmd := buildPTYCommand(s.command)
 	cmd.Env = os.Environ()
 	if s.cwd != "" {
@@ -303,6 +309,9 @@ func (s *ptySession) StartPipe() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.callerBound && s.startAttempted {
+		return errors.New("caller-bound session launch was already attempted")
+	}
 	if s.pid != 0 {
 		return errors.New("pty session already started")
 	}
@@ -310,6 +319,7 @@ func (s *ptySession) StartPipe() error {
 		return errors.New("pty session is closing")
 	}
 
+	s.startAttempted = true
 	stdinR, stdinW, err := os.Pipe()
 	if err != nil {
 		return fmt.Errorf("stdin pipe: %w", err)
@@ -635,6 +645,10 @@ func (s *ptySession) close() {
 	stdin := s.stdin
 	s.mu.Unlock()
 
+	s.releaseResources(pid, ptmx, stdin)
+}
+
+func (s *ptySession) releaseResources(pid int, ptmx *os.File, stdin io.WriteCloser) {
 	if pid != 0 {
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 	}
@@ -661,6 +675,10 @@ func (s *ptySession) close() {
 
 // CreatePTYSession creates a new PTY session and stores it in the map.
 func (c *Controller) CreatePTYSession(id, cwd, command string) (PTYSession, error) {
+	return c.createPTYSession(id, cwd, command, false)
+}
+
+func (c *Controller) createPTYSession(id, cwd, command string, callerBound bool) (PTYSession, error) {
 	resolvedCwd, err := pathutil.ExpandPath(cwd)
 	if err != nil {
 		return nil, fmt.Errorf("error resolving PTY session work directory: %w", err)
@@ -672,6 +690,7 @@ func (c *Controller) CreatePTYSession(id, cwd, command string) (PTYSession, erro
 		}
 	}
 	s := newPTYSession(id, resolvedCwd, command)
+	s.callerBound = callerBound
 	c.ptySessionMap.Store(id, s)
 	log.Info("created pty session %s", id)
 	return s, nil
@@ -718,3 +737,29 @@ func (c *Controller) GetPTYSessionStatus(id string) (running bool, outputOffset 
 	}
 	return s.IsRunning(), s.replay.Total(), nil
 }
+
+// expireOperationPTY excludes launch under the same mutex as StartPTY/StartPipe.
+// Dormant and terminal sessions can expire; live sessions remain recoverable.
+func (c *Controller) expireOperationPTY(id string) bool {
+	s := c.getPTYSession(id)
+	if s == nil {
+		return true
+	}
+	s.mu.Lock()
+	if s.doneCh != nil {
+		select {
+		case <-s.doneCh:
+		default:
+			s.mu.Unlock()
+			return false
+		}
+	}
+	s.closing = true
+	ptmx, stdin := s.ptmx, s.stdin
+	s.mu.Unlock()
+	s.releaseResources(0, ptmx, stdin)
+	c.ptySessionMap.CompareAndDelete(id, s)
+	return true
+}
+
+func (s *ptySession) CreationBound() bool { return s.callerBound }

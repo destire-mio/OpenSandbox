@@ -50,6 +50,8 @@ from opensandbox.models.execd import (
     CommandStatus,
     Execution,
     ExecutionHandlers,
+    ExecutionInstance,
+    ExecutionOperation,
     RunCommandOpts,
 )
 from opensandbox.models.sandboxes import SandboxEndpoint
@@ -425,3 +427,68 @@ class CommandsAdapter(Commands):
                 handle_api_error(parsed, "delete_session")
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e
+
+    async def get_execution_instance(self) -> ExecutionInstance:
+        """Get server scope/time; persist new_operation_id() before creation."""
+        from opensandbox.adapters.converter.response_handler import require_parsed
+        from opensandbox.api.execd.api.command import get_execution_instance
+        from opensandbox.api.execd.models import ExecutionInstance as ApiInstance
+
+        response = await get_execution_instance.asyncio_detailed(client=await self._get_client())
+        handle_api_error(response, "Get execution instance")
+        parsed = require_parsed(response, ApiInstance, "Get execution instance")
+        return ExecutionInstance.model_validate(parsed.to_dict())
+
+    async def get_execution_operation(self, kind: str, operation_id: str) -> ExecutionOperation:
+        """Recover a creation handle; never replace an expired or old-instance ID."""
+        from opensandbox.adapters.converter.response_handler import require_parsed
+        from opensandbox.api.execd.api.command import get_execution_operation
+        from opensandbox.api.execd.models import ExecutionOperation as ApiOperation
+        from opensandbox.api.execd.models.get_execution_operation_kind import (
+            GetExecutionOperationKind,
+        )
+
+        response = await get_execution_operation.asyncio_detailed(
+            client=await self._get_client(), kind=GetExecutionOperationKind(kind),
+            x_execd_operation_id=operation_id,
+        )
+        handle_api_error(response, "Get execution operation")
+        parsed = require_parsed(response, ApiOperation, "Get execution operation")
+        return ExecutionOperation.model_validate(parsed.to_dict())
+
+    async def create_command_operation(
+        self, operation_id: str, command: str, *, opts: RunCommandOpts | None = None,
+    ) -> ExecutionOperation:
+        """Create/recover with a persisted identity. Returns JSON, not streamed output."""
+        from opensandbox.adapters.converter.response_handler import require_parsed
+        from opensandbox.api.execd.api.command import create_command_operation
+        from opensandbox.api.execd.models import ExecutionOperation as ApiOperation
+
+        if not operation_id:
+            raise InvalidArgumentException("operation_id is required")
+        body = ExecutionConverter.to_api_run_command_request(command, opts or RunCommandOpts())
+        from opensandbox.api.execd.models import CreateCommandOperationRequest
+        creation_body = CreateCommandOperationRequest.from_dict({**body.to_dict(), "operation_id": operation_id})
+        response = await create_command_operation.asyncio_detailed(client=await self._get_client(), body=creation_body)
+        handle_api_error(response, "Create command operation")
+        parsed = require_parsed(response, ApiOperation, "Create command operation")
+        return ExecutionOperation.model_validate(parsed.to_dict())
+
+    async def create_pty_operation(
+        self, operation_id: str, *, cwd: str = "", command: str = "",
+    ) -> ExecutionOperation:
+        """Create/recover a dormant PTY; attach its ID with the existing WS protocol."""
+        from opensandbox.adapters.converter.response_handler import require_parsed
+        from opensandbox.api.execd.api.command import create_pty_operation
+        from opensandbox.api.execd.models import CreatePTYOperationRequest
+        from opensandbox.api.execd.models import ExecutionOperation as ApiOperation
+
+        if not operation_id:
+            raise InvalidArgumentException("operation_id is required")
+        response = await create_pty_operation.asyncio_detailed(
+            client=await self._get_client(),
+            body=CreatePTYOperationRequest(operation_id=operation_id, cwd=cwd, command=command),
+        )
+        handle_api_error(response, "Create PTY operation")
+        parsed = require_parsed(response, ApiOperation, "Create PTY operation")
+        return ExecutionOperation.model_validate(parsed.to_dict())

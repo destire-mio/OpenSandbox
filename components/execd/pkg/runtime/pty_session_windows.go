@@ -99,3 +99,9 @@ func (s *ptySession) ReadOutput(_ int64) ([]byte, int64, <-chan struct{}) {
 }
 func (s *ptySession) SendSignal(_ string)         {}
 func (s *ptySession) ResizePTY(_, _ uint16) error { return nil }
+
+func (c *Controller) expireOperationPTY(string) bool { return true }
+
+func (c *Controller) createPTYSession(id, cwd, command string, _ bool) (PTYSession, error) {
+	return c.CreatePTYSession(id, cwd, command)
+}

@@ -1,3 +1,4 @@
+import type { ExecutionInstance, ExecutionOperation } from "../models/execd.js";
 // Copyright 2026 Alibaba Group Holding Ltd.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -22,6 +23,11 @@ import type {
 } from "../models/execd.js";
 
 export interface ExecdCommands {
+  getExecutionInstance(): Promise<ExecutionInstance>;
+  getExecutionOperation(kind: "command" | "pty", operationId: string): Promise<ExecutionOperation>;
+  createCommandOperation(operationId: string, command: string, opts?: RunCommandOpts): Promise<ExecutionOperation>;
+  createPTYOperation(operationId: string, opts?: { cwd?: string; command?: string }): Promise<ExecutionOperation>;
+
   /**
    * Run a command and stream server events (SSE). This is the lowest-level API.
    */

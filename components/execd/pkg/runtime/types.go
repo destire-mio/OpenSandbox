@@ -35,15 +35,16 @@ type ExecuteResultHook struct {
 
 // ExecuteCodeRequest represents a code execution request with context and hooks.
 type ExecuteCodeRequest struct {
-	Language Language          `json:"language"`
-	Code     string            `json:"code"`
-	Context  string            `json:"context"`
-	Timeout  time.Duration     `json:"timeout"`
-	Cwd      string            `json:"cwd"`
-	Envs     map[string]string `json:"envs"`
-	Uid      *uint32           `json:"uid,omitempty"`
-	Gid      *uint32           `json:"gid,omitempty"`
-	Hooks    ExecuteResultHook
+	commandID string            // reserved by the controller before idempotent creation
+	Language  Language          `json:"language"`
+	Code      string            `json:"code"`
+	Context   string            `json:"context"`
+	Timeout   time.Duration     `json:"timeout"`
+	Cwd       string            `json:"cwd"`
+	Envs      map[string]string `json:"envs"`
+	Uid       *uint32           `json:"uid,omitempty"`
+	Gid       *uint32           `json:"gid,omitempty"`
+	Hooks     ExecuteResultHook
 }
 
 // SetDefaultHooks installs stdout logging fallbacks for unset hooks.

@@ -18,6 +18,8 @@ import { parseJsonEventStream } from "./sse.js";
 import type { paths as ExecdPaths } from "../api/execd.js";
 import type {
   CommandExecution,
+  ExecutionInstance,
+  ExecutionOperation,
   CommandLogs,
   CommandStatus,
   RunCommandOpts,
@@ -139,6 +141,42 @@ export class CommandsAdapter implements ExecdCommands {
     private readonly opts: CommandsAdapterOptions,
   ) {
     this.fetch = opts.fetch ?? fetch;
+  }
+
+  async getExecutionInstance(): Promise<ExecutionInstance> {
+    const { data, error, response } = await this.client.GET("/execution/instance");
+    throwOnOpenApiFetchError({ error, response }, "Get execution instance failed");
+    if (!data) throw new Error("Missing execution instance");
+    return data;
+  }
+
+  async getExecutionOperation(kind: "command" | "pty", operationId: string): Promise<ExecutionOperation> {
+    const { data, error, response } = await this.client.GET("/execution/operation", {
+      params: { query: { kind }, header: { "X-EXECD-OPERATION-ID": operationId } },
+    });
+    throwOnOpenApiFetchError({ error, response }, "Get execution operation failed");
+    if (!data) throw new Error("Missing execution operation");
+    return data;
+  }
+
+  async createCommandOperation(operationId: string, command: string, opts?: RunCommandOpts): Promise<ExecutionOperation> {
+    assertNonBlank(operationId, "operationId");
+    const { data, error, response } = await this.client.POST("/command/operations", {
+      body: { ...toRunCommandRequest(command, opts), operation_id: operationId },
+    });
+    throwOnOpenApiFetchError({ error, response }, "Create command operation failed");
+    if (!data || !("state" in data)) throw new Error("Missing execution operation");
+    return data;
+  }
+
+  async createPTYOperation(operationId: string, opts?: { cwd?: string; command?: string }): Promise<ExecutionOperation> {
+    assertNonBlank(operationId, "operationId");
+    const { data, error, response } = await this.client.POST("/pty/operations", {
+      body: { ...opts, operation_id: operationId },
+    });
+    throwOnOpenApiFetchError({ error, response }, "Create PTY operation failed");
+    if (!data || !("state" in data)) throw new Error("Missing execution operation");
+    return data;
   }
 
   private buildRunStreamSpec(

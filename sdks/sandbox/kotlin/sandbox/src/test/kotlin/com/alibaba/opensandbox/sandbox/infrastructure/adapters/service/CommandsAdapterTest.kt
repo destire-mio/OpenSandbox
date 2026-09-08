@@ -48,6 +48,34 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 class CommandsAdapterTest {
+    @Test
+    fun `operation creation preserves identity and creation state`() {
+        mockWebServer.enqueue(
+            MockResponse().setBody("""{"instance_id":"scope","issued_at":123,"retention_seconds":86400,"capacity":4096}"""),
+        )
+        val instance = commandsAdapter.getExecutionInstance()
+        assertTrue(instance.newOperationId().startsWith("scope.123."))
+        mockWebServer.takeRequest()
+        val response = """{"id":"original","kind":"command","state":"creating","expires_at":"2026-09-09T00:00:00Z"}"""
+        mockWebServer.enqueue(MockResponse().setResponseCode(202).setBody(response))
+        val operation =
+            commandsAdapter.createCommandOperation(
+                "scope.123.persisted",
+                RunCommandRequest.builder().command("echo hello").build(),
+            )
+        assertEquals("creating", operation.state)
+        val body = Json.parseToJsonElement(mockWebServer.takeRequest().body.readUtf8()).jsonObject
+        assertEquals("scope.123.persisted", body["operation_id"]?.jsonPrimitive?.content)
+        assertEquals("echo hello", body["command"]?.jsonPrimitive?.content)
+        mockWebServer.enqueue(MockResponse().setResponseCode(202).setBody(response))
+        assertEquals(operation.id, commandsAdapter.getExecutionOperation("command", "scope.123.persisted").id)
+        assertEquals("scope.123.persisted", mockWebServer.takeRequest().getHeader("X-EXECD-OPERATION-ID"))
+        mockWebServer.enqueue(MockResponse().setResponseCode(202).setBody(response))
+        assertEquals(operation.id, commandsAdapter.createPTYOperation("scope.123.persisted", "/tmp", "echo hello").id)
+        val ptyBody = Json.parseToJsonElement(mockWebServer.takeRequest().body.readUtf8()).jsonObject
+        assertEquals("scope.123.persisted", ptyBody["operation_id"]?.jsonPrimitive?.content)
+    }
+
     // CommandsAdapter unit tests
     private lateinit var mockWebServer: MockWebServer
     private lateinit var commandsAdapter: CommandsAdapter

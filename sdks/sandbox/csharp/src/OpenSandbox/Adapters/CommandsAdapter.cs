@@ -26,7 +26,7 @@ namespace OpenSandbox.Adapters;
 /// <summary>
 /// Adapter for the execd commands service.
 /// </summary>
-internal sealed class CommandsAdapter : IExecdCommands
+internal sealed class CommandsAdapter : IExecdCommands, IExecutionOperations
 {
     private readonly HttpClientWrapper _client;
     private readonly HttpClient _sseHttpClient;
@@ -52,6 +52,35 @@ internal sealed class CommandsAdapter : IExecdCommands
         _baseUrl = baseUrl?.TrimEnd('/') ?? throw new ArgumentNullException(nameof(baseUrl));
         _headers = headers ?? new Dictionary<string, string>();
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+    }
+
+    public Task<ExecutionInstance> GetExecutionInstanceAsync(CancellationToken cancellationToken = default)
+        => _client.GetAsync<ExecutionInstance>("/execution/instance", cancellationToken: cancellationToken);
+
+    public async Task<ExecutionOperation> GetExecutionOperationAsync(string kind, string operationId, CancellationToken cancellationToken = default)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"{_baseUrl}/execution/operation?kind={Uri.EscapeDataString(kind)}");
+        request.Headers.Add("X-EXECD-OPERATION-ID", operationId);
+        using var response = await _client.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        var content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode) throw CreateApiException(response, content);
+        return JsonSerializer.Deserialize<ExecutionOperation>(content, JsonOptions)
+            ?? throw new InvalidOperationException("Missing execution operation");
+    }
+
+    public Task<ExecutionOperation> CreateCommandOperationAsync(string operationId, string command, RunCommandOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(operationId)) throw new InvalidArgumentException("operationId is required");
+        ValidateRunOptions(options);
+        var body = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(JsonSerializer.Serialize(BuildRunCommandRequest(command, options), JsonOptions))!;
+        body["operation_id"] = JsonSerializer.SerializeToElement(operationId);
+        return _client.PostAsync<ExecutionOperation>("/command/operations", body, cancellationToken);
+    }
+
+    public Task<ExecutionOperation> CreatePtyOperationAsync(string operationId, string? cwd = null, string? command = null, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(operationId)) throw new InvalidArgumentException("operationId is required");
+        return _client.PostAsync<ExecutionOperation>("/pty/operations", new { operation_id = operationId, cwd, command }, cancellationToken);
     }
 
     public async IAsyncEnumerable<ServerStreamEvent> RunStreamAsync(
