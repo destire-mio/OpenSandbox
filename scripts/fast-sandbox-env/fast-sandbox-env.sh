@@ -365,6 +365,16 @@ preflight() {
 		die "docker cgroup Version is 1; kind requires cgroup v2. Enable it with the kernel cmdline 'systemd.unified_cgroup_hierarchy=1' and reboot"
 	fi
 	[[ -e /dev/kvm ]] || die "/dev/kvm is missing on this host (KVM required)"
+	# The workspace filesystem carries docker images (built), the XFS
+	# StateRoot loop file (sparse, up to 24G), MinIO artifacts (~4G per
+	# template build) and node snapshot caches; MinIO refuses writes
+	# below its free-disk threshold, so guard it here with a clear error.
+	local min_free_kb=$((30 * 1024 * 1024)) free_kb
+	free_kb="$(df -Pk "$WORK" 2>/dev/null | awk 'NR==2 {print $4}')"
+	[[ "$free_kb" =~ ^[0-9]+$ ]] || die "cannot determine free disk space on $WORK"
+	if (( free_kb < min_free_kb )); then
+		die "only $((free_kb / 1024 / 1024))G free on $WORK (need 30G: images + XFS StateRoot + MinIO artifacts); free space (docker system prune / old kind clusters) or point WORK at a bigger volume"
+	fi
 	# Fail fast on busy MinIO host ports instead of dying at the docker
 	# bind in stage 8. A common culprit is fast-sandbox's own
 	# integration-env.sh MinIO (container integration-env-minio).
