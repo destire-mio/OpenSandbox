@@ -39,8 +39,8 @@
 #
 # Environment overrides (all optional):
 #   WORK                 workspace + logs        (default $PWD/.fast-sandbox-env)
-#   FSB_DIR              fast-sandbox checkout  (default sibling ../fast-sandbox;
-#                        cloned from FSB_GIT_URL when missing)
+#   FSB_DIR              fast-sandbox checkout  (default $WORK/fast-sandbox —
+#                        env-owned clone, created from FSB_GIT_URL when missing)
 #   FSB_GIT_URL / FSB_REF                       (default opensandbox-group/fast-sandbox, master)
 #   KIND_CLUSTER / KIND_NODE_IMAGE / KIND_RETAIN / KIND_SINGLE
 #   DOCKER_MIRROR        comma list injected as docker.io containerd mirrors
@@ -66,7 +66,9 @@ WORK="${WORK:-$PWD/.fast-sandbox-env}"
 LOGS_DIR="$WORK/logs"
 GEN_DIR="$WORK/gen"
 
-FSB_DIR="${FSB_DIR:-$OSB_ROOT/../fast-sandbox}"
+# Env-owned fast-sandbox clone under $WORK (independent of any checkout
+# outside the workspace); FSB_DIR still overrides for an existing one.
+FSB_DIR="${FSB_DIR:-$WORK/fast-sandbox}"
 FSB_GIT_URL="${FSB_GIT_URL:-https://github.com/opensandbox-group/fast-sandbox.git}"
 FSB_REF="${FSB_REF:-master}"
 
@@ -394,7 +396,7 @@ ensure_fsb() {
 	fi
 	rm -rf "$FSB_GEN_DIR"
 	[[ -z "$(git -C "$FSB_DIR" status --porcelain)" ]] \
-		|| die "fast-sandbox checkout at $FSB_DIR has local changes; stash/commit them or point FSB_DIR at a clean checkout"
+		|| die "fast-sandbox checkout at $FSB_DIR has local changes; delete it to re-clone or point FSB_DIR at a clean checkout"
 	git -C "$FSB_DIR" fetch -q origin "$FSB_REF" || die "git fetch origin $FSB_REF failed"
 	git -C "$FSB_DIR" checkout -q "$FSB_REF" || die "git checkout $FSB_REF failed"
 	git -C "$FSB_DIR" merge -q --ff-only "origin/$FSB_REF" \

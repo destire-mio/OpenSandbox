@@ -71,8 +71,9 @@ SDK ──header──> ingress gateway (source-built, --provider-type=fleets)
 - **On-demand loading**: the pool has no `warmImages`; the verify
   sandbox's create pulls the golden snapshot set through DART.
   `WARM_IMAGES=1` preheats instead.
-- **fast-sandbox @ master**: cloned (or updated) from
-  `opensandbox-group/fast-sandbox`; override with `FSB_DIR` / `FSB_REF`.
+- **fast-sandbox @ master**: env-owned clone at `$WORK/fast-sandbox`,
+  cloned on first `up` and ff-updated afterwards; override the location
+  with `FSB_DIR`, the source with `FSB_GIT_URL` / `FSB_REF`.
 
 ## Layout
 
@@ -120,7 +121,7 @@ Every stage logs to `$WORK/logs/`; failures dump component logs to
 | Variable | Default | Meaning |
 |---|---|---|
 | `WORK` | `$PWD/.fast-sandbox-env` | workspace + logs |
-| `FSB_DIR` | sibling `../fast-sandbox` | fast-sandbox checkout (cloned when missing) |
+| `FSB_DIR` | `$WORK/fast-sandbox` | fast-sandbox checkout (env-owned clone, created when missing) |
 | `KIND_CLUSTER` | `fast-sandbox-integration` | kind cluster name |
 | `KIND_SINGLE` | `0` | `1` = single node (cache-only, no peer traffic) |
 | `DOCKER_MIRROR` | — | comma list injected as docker.io containerd mirrors |
