@@ -1161,13 +1161,29 @@ verify_gateway_ping() {
 # -> fastlet-proxy -> guest execd /ping -> delete.
 opensandbox_verify() {
 	local body created
-	body="$(jq -n --arg image "$SBX_IMAGE" '{
-		image: {uri: $image, entrypoint: ["tail", "-f", "/dev/null"]},
+	# Shape required by the fleets create path: image.uri + top-level
+	# entrypoint + timeout (mandatory on fleets, >= 60s) + resourceLimits
+	# matching the pool's sandboxResources exactly (read from the pool
+	# manifest this environment owns).
+	local pool_cpu pool_memory pool_pids
+	pool_cpu="$(awk '/^  sandboxResources:/{f=1;next} f && $1=="cpu:"{gsub(/"/,""); print $2; exit}' "$MANIFESTS_DIR/pool/firecracker-egress-pool.yaml")"
+	pool_memory="$(awk '/^  sandboxResources:/{f=1;next} f && $1=="memory:"{gsub(/"/,""); print $2; exit}' "$MANIFESTS_DIR/pool/firecracker-egress-pool.yaml")"
+	pool_pids="$(awk '/^  sandboxResources:/{f=1;next} f && $1=="pids:"{gsub(/"/,""); print $2; exit}' "$MANIFESTS_DIR/pool/firecracker-egress-pool.yaml")"
+	[[ -n "$pool_cpu" && -n "$pool_memory" && -n "$pool_pids" ]] \
+		|| die "could not read sandboxResources from the pool manifest"
+	body="$(jq -n --arg image "$SBX_IMAGE" \
+		--arg cpu "$pool_cpu" --arg memory "$pool_memory" --arg pids "$pool_pids" '{
+		image: {uri: $image},
+		entrypoint: ["tail", "-f", "/dev/null"],
+		timeout: 3600,
+		resourceLimits: {cpu: $cpu, memory: $memory, pids: $pids},
 		metadata: {origin: "fast-sandbox-env-verify"}
 	}')"
-	log "verify: creating a sandbox via the server API (image=$SBX_IMAGE)"
-	created="$(server_api POST /sandboxes "$body")" \
-		|| fail "POST /sandboxes failed against $SERVER_URL"
+	log "verify: creating a sandbox via the server API (image=$SBX_IMAGE, limits cpu=$pool_cpu memory=$pool_memory pids=$pool_pids)"
+	created="$(server_api POST /sandboxes "$body" 2>/dev/null)" \
+		|| fail "POST /sandboxes failed against $SERVER_URL: $(curl -sS -m 60 -X POST \
+			-H "OPEN-SANDBOX-API-KEY: $SERVER_API_KEY" -H "Content-Type: application/json" \
+			-d "$body" "$SERVER_URL/sandboxes" 2>&1 | head -c 400)"
 	VERIFY_ID="$(printf '%s' "$created" | jq -r '.id')"
 	[[ -n "$VERIFY_ID" && "$VERIFY_ID" != "null" ]] || fail "create response carried no id"
 	log "verify: sandbox id=$VERIFY_ID"
