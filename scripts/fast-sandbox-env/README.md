@@ -133,4 +133,5 @@ Every stage logs to `$WORK/logs/`; failures dump component logs to
 | `WARM_IMAGES` | `0` | `1` = preheat pool instead of on-demand first-sandbox pull |
 | `SBX_IMAGE` / `EXECD` | `alpine:3.19` / `opensandbox/execd:1.1.0` | template build inputs |
 | `MINIO_PORT` | `9000` | host-side publish; in-cluster clients always use the container port |
+| `MINIO_CONSOLE_PORT` | `9001` | host-side MinIO console publish (human-only; override on port collision) |
 | `XFS_STATEROOT` / `XFS_SIZE` | `1` / `24G` | reflink StateRoot on/off, virtual size |

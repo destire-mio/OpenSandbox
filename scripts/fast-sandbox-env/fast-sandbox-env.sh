@@ -44,7 +44,7 @@
 #   FSB_GIT_URL / FSB_REF                       (default opensandbox-group/fast-sandbox, master)
 #   KIND_CLUSTER / KIND_NODE_IMAGE / KIND_RETAIN / KIND_SINGLE
 #   DOCKER_MIRROR        comma list injected as docker.io containerd mirrors
-#   MINIO_PORT / MINIO_AK / MINIO_SK / MINIO_IMAGE / MINIO_ENDPOINT
+#   MINIO_PORT / MINIO_CONSOLE_PORT / MINIO_AK / MINIO_SK / MINIO_IMAGE / MINIO_ENDPOINT
 #   IMAGE_<NAME>         fast-sandbox component image tags
 #   EGRESS_IMAGE         egress image tag        (default docker.io/opensandbox/egress:latest)
 #   SERVER_IMAGE / INGRESS_IMAGE  OpenSandbox server/ingress image tags
@@ -83,6 +83,9 @@ MINIO_PORT="${MINIO_PORT:-9000}"
 # the port kind-network clients use via the container IP); MINIO_PORT only
 # moves the host-side 127.0.0.1 publish.
 MINIO_CONTAINER_PORT=9000
+# Console (human-only UI) listens on 9001 in-container; the host-side
+# publish is overridable because 9001 is a common host-port collision.
+MINIO_CONSOLE_PORT="${MINIO_CONSOLE_PORT:-9001}"
 MINIO_AK="${MINIO_AK:-integration-env}"
 MINIO_SK="${MINIO_SK:-integration-env-secret}"
 MINIO_BUCKET="sandbox-images"
@@ -616,7 +619,7 @@ minio_up() {
 	# issues: pods and the node container talk to the container IP directly,
 	# while 127.0.0.1 publishing keeps host-side mc/curl working.
 	docker run -d --name "$MINIO_CONTAINER" --network "$net" \
-		-p 127.0.0.1:"$MINIO_PORT":"$MINIO_CONTAINER_PORT" -p 127.0.0.1:9001:9001 \
+		-p 127.0.0.1:"$MINIO_PORT":"$MINIO_CONTAINER_PORT" -p 127.0.0.1:"$MINIO_CONSOLE_PORT":9001 \
 		-e MINIO_ROOT_USER="$MINIO_AK" -e MINIO_ROOT_PASSWORD="$MINIO_SK" \
 		-v "$MINIO_DATA:/data" \
 		"$MINIO_IMAGE" server /data --console-address ":9001" >/dev/null
