@@ -57,3 +57,80 @@ test("legacy adapters retain type compatibility and recovery is optional", async
     fileURLToPath(new URL("./legacy-commands.mts", import.meta.url))]);
   assert.throws(() => getExecutionOperations({}), /does not support/);
 });
+
+function instanceAdapter(fetch) {
+  const config = { baseUrl: "http://localhost:44772", fetch };
+  return new CommandsAdapter(createExecdClient(config), config);
+}
+
+const instanceBody = (issuedAt = 123) => ({ instance_id: "scope", issued_at: issuedAt, retention_seconds: 86400, capacity: 4096 });
+
+test("instance cache coalesces requests, isolates snapshots and expires from fetch start", async (t) => {
+  let now = 0;
+  t.mock.method(performance, "now", () => now);
+  let calls = 0;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const adapter = instanceAdapter(async () => {
+    const issuedAt = ++calls;
+    await gate;
+    return Response.json(instanceBody(issuedAt));
+  });
+  const pending = Array.from({ length: 16 }, () => adapter.getExecutionInstance());
+  now = 59_000;
+  release();
+  const values = await Promise.all(pending);
+  assert.equal(calls, 1);
+  assert.equal(new Set(values).size, 16);
+  values[0].instance_id = "caller-mutation";
+  assert.equal((await adapter.getExecutionInstance()).instance_id, "scope");
+  now = 60_000;
+  assert.equal((await adapter.getExecutionInstance()).issued_at, 2);
+  assert.equal(calls, 2);
+});
+
+test("failed instance fetch is retried by the next caller", async () => {
+  let calls = 0;
+  const adapter = instanceAdapter(async () => ++calls === 1
+    ? Response.json({ code: "unavailable", message: "retry later" }, { status: 503 })
+    : Response.json(instanceBody()));
+  await assert.rejects(adapter.getExecutionInstance(), SandboxApiException);
+  assert.equal((await adapter.getExecutionInstance()).instance_id, "scope");
+  assert.equal(calls, 2);
+});
+
+for (const code of ["operation_instance_mismatch", "operation_expired"]) {
+  for (const method of ["command", "pty", "lookup"]) {
+    test(`${code} during ${method} invalidates inflight instance without replay`, async () => {
+      let gets = 0;
+      let operations = 0;
+      let release;
+      let entered;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const started = new Promise((resolve) => { entered = resolve; });
+      const adapter = instanceAdapter(async (request) => {
+        if (new URL(request.url).pathname === "/execution/instance") {
+          const issuedAt = ++gets;
+          if (issuedAt === 1) { entered(); await gate; }
+          return Response.json(instanceBody(issuedAt));
+        }
+        operations++;
+        if (request.method === "POST") assert.equal((await request.json()).operation_id, "saved.identity");
+        else assert.equal(request.headers.get("X-EXECD-OPERATION-ID"), "saved.identity");
+        return Response.json({ code, message: "unknown outcome" }, { status: 409 });
+      });
+      const old = adapter.getExecutionInstance();
+      await started;
+      const action = method === "command" ? adapter.createCommandOperation("saved.identity", "true")
+        : method === "pty" ? adapter.createPTYOperation("saved.identity")
+        : adapter.getExecutionOperation("command", "saved.identity");
+      await assert.rejects(action, SandboxApiException);
+      assert.equal((await adapter.getExecutionInstance()).issued_at, 2);
+      release();
+      assert.equal((await old).issued_at, 1);
+      assert.equal((await adapter.getExecutionInstance()).issued_at, 2);
+      assert.equal(gets, 2);
+      assert.equal(operations, 1);
+    });
+  }
+}

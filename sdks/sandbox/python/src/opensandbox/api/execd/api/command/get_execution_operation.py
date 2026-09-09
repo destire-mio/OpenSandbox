@@ -131,13 +131,14 @@ def sync_detailed(
             /execution/instance, generate token and persist the entire ID before sending. Scope is the
             authenticated execd controller and kind; clients sharing its configured token share one
             principal. Recovery lasts 24 hours from issued_at, extended while creating or active.
-            Capacity is 4096 records/controller; new claims fail closed at capacity. Expired
-            terminal/dormant records are removed; old expired IDs return 410 instead of recreating.
-            Controller restart or another sandbox returns 409 operation_instance_mismatch: outcome
-            unknown. Memory and OS process creation are not a transaction. No cross-execd-restart
-            reconciliation, exactly-once completion, or business-side-effect guarantee. Never
-            regenerate any identity component during retry. Use an opaque random token, never a secret
-            or business payload.
+            Default capacity is 4096 records/controller, configurable at startup with --operation-
+            capacity or EXECD_OPERATION_CAPACITY and advertised by instance discovery; new claims fail
+            closed at capacity. Expired terminal/dormant records are removed; old expired IDs return
+            410 instead of recreating. Controller restart or another sandbox returns 409
+            operation_instance_mismatch: outcome unknown. Memory and OS process creation are not a
+            transaction. No cross-execd-restart reconciliation, exactly-once completion, or business-
+            side-effect guarantee. Never regenerate any identity component during retry. Use an opaque
+            random token, never a secret or business payload.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -178,13 +179,14 @@ def sync(
             /execution/instance, generate token and persist the entire ID before sending. Scope is the
             authenticated execd controller and kind; clients sharing its configured token share one
             principal. Recovery lasts 24 hours from issued_at, extended while creating or active.
-            Capacity is 4096 records/controller; new claims fail closed at capacity. Expired
-            terminal/dormant records are removed; old expired IDs return 410 instead of recreating.
-            Controller restart or another sandbox returns 409 operation_instance_mismatch: outcome
-            unknown. Memory and OS process creation are not a transaction. No cross-execd-restart
-            reconciliation, exactly-once completion, or business-side-effect guarantee. Never
-            regenerate any identity component during retry. Use an opaque random token, never a secret
-            or business payload.
+            Default capacity is 4096 records/controller, configurable at startup with --operation-
+            capacity or EXECD_OPERATION_CAPACITY and advertised by instance discovery; new claims fail
+            closed at capacity. Expired terminal/dormant records are removed; old expired IDs return
+            410 instead of recreating. Controller restart or another sandbox returns 409
+            operation_instance_mismatch: outcome unknown. Memory and OS process creation are not a
+            transaction. No cross-execd-restart reconciliation, exactly-once completion, or business-
+            side-effect guarantee. Never regenerate any identity component during retry. Use an opaque
+            random token, never a secret or business payload.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -220,13 +222,14 @@ async def asyncio_detailed(
             /execution/instance, generate token and persist the entire ID before sending. Scope is the
             authenticated execd controller and kind; clients sharing its configured token share one
             principal. Recovery lasts 24 hours from issued_at, extended while creating or active.
-            Capacity is 4096 records/controller; new claims fail closed at capacity. Expired
-            terminal/dormant records are removed; old expired IDs return 410 instead of recreating.
-            Controller restart or another sandbox returns 409 operation_instance_mismatch: outcome
-            unknown. Memory and OS process creation are not a transaction. No cross-execd-restart
-            reconciliation, exactly-once completion, or business-side-effect guarantee. Never
-            regenerate any identity component during retry. Use an opaque random token, never a secret
-            or business payload.
+            Default capacity is 4096 records/controller, configurable at startup with --operation-
+            capacity or EXECD_OPERATION_CAPACITY and advertised by instance discovery; new claims fail
+            closed at capacity. Expired terminal/dormant records are removed; old expired IDs return
+            410 instead of recreating. Controller restart or another sandbox returns 409
+            operation_instance_mismatch: outcome unknown. Memory and OS process creation are not a
+            transaction. No cross-execd-restart reconciliation, exactly-once completion, or business-
+            side-effect guarantee. Never regenerate any identity component during retry. Use an opaque
+            random token, never a secret or business payload.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -265,13 +268,14 @@ async def asyncio(
             /execution/instance, generate token and persist the entire ID before sending. Scope is the
             authenticated execd controller and kind; clients sharing its configured token share one
             principal. Recovery lasts 24 hours from issued_at, extended while creating or active.
-            Capacity is 4096 records/controller; new claims fail closed at capacity. Expired
-            terminal/dormant records are removed; old expired IDs return 410 instead of recreating.
-            Controller restart or another sandbox returns 409 operation_instance_mismatch: outcome
-            unknown. Memory and OS process creation are not a transaction. No cross-execd-restart
-            reconciliation, exactly-once completion, or business-side-effect guarantee. Never
-            regenerate any identity component during retry. Use an opaque random token, never a secret
-            or business payload.
+            Default capacity is 4096 records/controller, configurable at startup with --operation-
+            capacity or EXECD_OPERATION_CAPACITY and advertised by instance discovery; new claims fail
+            closed at capacity. Expired terminal/dormant records are removed; old expired IDs return
+            410 instead of recreating. Controller restart or another sandbox returns 409
+            operation_instance_mismatch: outcome unknown. Memory and OS process creation are not a
+            transaction. No cross-execd-restart reconciliation, exactly-once completion, or business-
+            side-effect guarantee. Never regenerate any identity component during retry. Use an opaque
+            random token, never a secret or business payload.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

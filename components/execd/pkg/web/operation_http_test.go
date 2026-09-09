@@ -300,6 +300,10 @@ func TestOperationPTYHTTP(t *testing.T) {
 	require.True(t, os.IsNotExist(err), "POST must not start the PTY process")
 	status, data := postOperation(t, server.URL, "/pty/operations", body)
 	require.Equal(t, original.ID, decodeOperation(t, status, data).ID)
+	require.Eventually(t, func() bool {
+		status, data := getOperationHTTP(t, server.URL, "/execution/operation?kind=pty", key, "test-token")
+		return decodeOperation(t, status, data).State == "created"
+	}, 5*time.Second, time.Millisecond)
 	dial := func(query string) *websocket.Conn {
 		conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/pty/"+original.ID+"/ws"+query, http.Header{"X-EXECD-ACCESS-TOKEN": []string{"test-token"}})
 		require.NoError(t, err)
@@ -528,7 +532,8 @@ func TestOperationDaemonHTTP(t *testing.T) {
 	launch := func() func() {
 		file, err := os.CreateTemp(t.TempDir(), "daemon-*.log")
 		require.NoError(t, err)
-		cmd := exec.Command(binary, fmt.Sprintf("--port=%d", port), "--access-token=test-token")
+		cmd := exec.Command(binary, fmt.Sprintf("--port=%d", port), "--access-token=test-token", "--operation-capacity=37")
+		cmd.Env = append(os.Environ(), "EXECD_OPERATION_CAPACITY=41")
 		cmd.Stdout = file
 		cmd.Stderr = file
 		require.NoError(t, cmd.Start())
@@ -541,8 +546,9 @@ func TestOperationDaemonHTTP(t *testing.T) {
 			if err != nil {
 				return false
 			}
-			resp.Body.Close()
-			return resp.StatusCode == 200
+			defer resp.Body.Close()
+			var instance struct{ Capacity int }
+			return resp.StatusCode == 200 && json.NewDecoder(resp.Body).Decode(&instance) == nil && instance.Capacity == 37
 		}, 10*time.Second, 20*time.Millisecond)
 		return stop
 	}

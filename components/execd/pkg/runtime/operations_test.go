@@ -35,6 +35,18 @@ func requireOperationError(t *testing.T, err error, code string) {
 	require.Equal(t, code, e.Code)
 }
 
+func awaitOperationCreated(t *testing.T, c *Controller, kind, key string) Operation {
+	t.Helper()
+	var operation Operation
+	require.Eventually(t, func() bool {
+		var err error
+		operation, err = c.GetOperation("owner", kind, key)
+		return err == nil && operation.State != "creating"
+	}, 5*time.Second, time.Millisecond)
+	require.Equal(t, "created", operation.State)
+	return operation
+}
+
 func TestOperationClaimAndRetention(t *testing.T) {
 	c := NewController("", "")
 	c.initOperations()
@@ -136,4 +148,41 @@ func TestOperationFailureAndFingerprint(t *testing.T) {
 		requireOperationError(t, err, "operation_conflict")
 		require.NotContains(t, err.Error(), "secret")
 	}
+}
+
+func TestOperationCapacityConfigurationAndStats(t *testing.T) {
+	c := NewController("", "")
+	require.Equal(t, 4096, c.GetOperationInstance().Capacity)
+	require.Error(t, c.ConfigureOperationCapacity(0))
+	require.NoError(t, c.ConfigureOperationCapacity(3))
+	require.Equal(t, 3, c.GetOperationInstance().Capacity)
+	now := time.Unix(1700000000, 0)
+	c.operations.now = func() time.Time { return now }
+	first, _, err := c.claimOperation("owner", "command", testOperationID(c, "creating-record"), "payload")
+	require.NoError(t, err)
+	second, _, err := c.claimOperation("owner", "command", testOperationID(c, "failed-record"), "payload")
+	require.NoError(t, err)
+	c.finishCreation(second, true)
+	third, _, err := c.claimOperation("owner", "pty", testOperationID(c, "created-record"), "payload")
+	require.NoError(t, err)
+	c.finishCreation(third, false)
+	now = now.Add(15 * time.Second)
+	stats := c.OperationStats()
+	require.Equal(t, int64(3), stats.Capacity)
+	require.Equal(t, [2][3]int64{{1, 0, 1}, {0, 1, 0}}, stats.Records)
+	require.Equal(t, float64(15), stats.OldestCreatingAge)
+	require.Error(t, c.ConfigureOperationCapacity(2))
+	_, _, err = c.claimOperation("owner", "command", testOperationID(c, "over-capacity"), "payload")
+	requireOperationError(t, err, "operation_capacity_exceeded")
+	c.finishCreation(first, false)
+	now = now.Add(operationRetention)
+	last, owner, err := c.claimOperation("owner", "command", testOperationID(c, "after-cleanup"), "payload")
+	require.NoError(t, err)
+	require.True(t, owner)
+	require.Len(t, c.operations.records, 1)
+	c.finishCreation(last, false)
+	now = now.Add(operationRetention)
+	c.cleanupOperations()
+	require.Empty(t, c.operations.records)
+	require.Error(t, c.ConfigureOperationCapacity(4))
 }

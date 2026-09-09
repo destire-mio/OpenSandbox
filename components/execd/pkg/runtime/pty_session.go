@@ -754,6 +754,11 @@ func (c *Controller) expireOperationPTY(id string) bool {
 			return false
 		}
 	}
+	if s.closing {
+		s.mu.Unlock()
+		c.ptySessionMap.CompareAndDelete(id, s)
+		return true
+	}
 	s.closing = true
 	ptmx, stdin := s.ptmx, s.stdin
 	s.mu.Unlock()

@@ -18,10 +18,12 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"maps"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 )
 
@@ -51,10 +53,75 @@ type ExecutionOperation struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
+type executionInstanceFetch struct {
+	done  chan struct{}
+	value ExecutionInstance
+	err   error
+}
+
+type executionInstanceCache struct {
+	sync.Mutex
+	value      ExecutionInstance
+	expires    time.Time
+	pending    *executionInstanceFetch
+	generation uint64
+}
+
+// GetExecutionInstance reuses a private server snapshot for at most one minute.
+// Call for each new operation; recovery must load the previously persisted ID.
 func (e *ExecdClient) GetExecutionInstance(ctx context.Context) (*ExecutionInstance, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	cache := &e.instanceCache
+	cache.Lock()
+	if time.Now().Before(cache.expires) {
+		result := cache.value
+		cache.Unlock()
+		return &result, nil
+	}
+	if pending := cache.pending; pending != nil {
+		cache.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-pending.done:
+			result := pending.value
+			return &result, pending.err
+		}
+	}
+	pending := &executionInstanceFetch{done: make(chan struct{})}
+	cache.pending = pending
+	generation := cache.generation
+	started := time.Now()
+	cache.Unlock()
+
 	var result ExecutionInstance
 	err := e.client.doRequest(ctx, http.MethodGet, "/execution/instance", nil, &result)
+	cache.Lock()
+	pending.value, pending.err = result, err
+	if generation == cache.generation && err == nil {
+		cache.value = result
+		cache.expires = started.Add(time.Minute)
+	}
+	if cache.pending == pending {
+		cache.pending = nil
+	}
+	close(pending.done)
+	cache.Unlock()
 	return &result, err
+}
+
+func (e *ExecdClient) invalidateOperationInstance(err error) {
+	var apiError *APIError
+	if errors.As(err, &apiError) && (apiError.Response.Code == "operation_instance_mismatch" || apiError.Response.Code == "operation_expired") {
+		cache := &e.instanceCache
+		cache.Lock()
+		cache.expires = time.Time{}
+		cache.pending = nil
+		cache.generation++
+		cache.Unlock()
+	}
 }
 
 func (e *ExecdClient) GetExecutionOperation(ctx context.Context, kind, operationID string) (*ExecutionOperation, error) {
@@ -67,6 +134,7 @@ func (e *ExecdClient) GetExecutionOperation(ctx context.Context, kind, operation
 	client.headers["X-EXECD-OPERATION-ID"] = operationID
 	var result ExecutionOperation
 	err := client.doRequest(ctx, http.MethodGet, "/execution/operation?kind="+url.QueryEscape(kind), nil, &result)
+	e.invalidateOperationInstance(err)
 	return &result, err
 }
 
@@ -82,6 +150,7 @@ func (e *ExecdClient) CreateCommandOperation(ctx context.Context, operationID st
 	}{request, operationID}
 	var result ExecutionOperation
 	err := e.client.doRequest(ctx, http.MethodPost, "/command/operations", body, &result)
+	e.invalidateOperationInstance(err)
 	return &result, err
 }
 
@@ -98,5 +167,6 @@ func (e *ExecdClient) CreatePTYOperation(ctx context.Context, operationID, cwd, 
 	}{operationID, cwd, command}
 	var result ExecutionOperation
 	err := e.client.doRequest(ctx, http.MethodPost, "/pty/operations", body, &result)
+	e.invalidateOperationInstance(err)
 	return &result, err
 }

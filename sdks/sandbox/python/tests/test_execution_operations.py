@@ -13,7 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import asyncio
 import json
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
 import httpx
@@ -205,3 +209,231 @@ def test_recovery_capability_rejects_legacy_adapters():
         get_execution_operations(cast(Commands, object()))
     with pytest.raises(TypeError, match="does not support"):
         sync_operations(cast(CommandsSync, object()))
+
+
+def instance_response(issued_at=123):
+    return httpx.Response(
+        200,
+        json={
+            "instance_id": "scope",
+            "issued_at": issued_at,
+            "retention_seconds": 86400,
+            "capacity": 4096,
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_instance_cache():
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        entered.set()
+        await release.wait()
+        return instance_response(calls)
+
+    adapter = CommandsAdapter(
+        ConnectionConfig(), SandboxEndpoint(endpoint="localhost:44772")
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://localhost:44772"
+    ) as client:
+        adapter._client.set_async_httpx_client(client)
+        try:
+            tasks = [
+                asyncio.create_task(adapter.get_execution_instance()) for _ in range(16)
+            ]
+            await entered.wait()
+            tasks[0].cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await tasks[0]
+            release.set()
+            values = await asyncio.gather(*tasks[1:])
+            assert calls == 1 and len({id(value) for value in values}) == 15
+            values[0].instance_id = "caller-mutation"
+            assert (await adapter.get_execution_instance()).instance_id == "scope"
+            adapter._instance_cache = (time.monotonic() - 60, values[1])
+            assert (await adapter.get_execution_instance()).issued_at == 2
+        finally:
+            release.set()
+            await adapter._httpx_client.aclose()
+            await adapter._sse_client.aclose()
+
+
+def test_sync_instance_cache():
+    entered, release = threading.Event(), threading.Event()
+    calls = 0
+
+    def handler(request):
+        nonlocal calls
+        calls += 1
+        entered.set()
+        assert release.wait(5)
+        return instance_response(calls)
+
+    adapter = CommandsAdapterSync(
+        ConnectionConfig(), SandboxEndpoint(endpoint="localhost:44772")
+    )
+    with httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="http://localhost:44772"
+    ) as client:
+        adapter._client.set_httpx_client(client)
+        try:
+            with ThreadPoolExecutor(max_workers=16) as pool:
+                tasks = [pool.submit(adapter.get_execution_instance) for _ in range(16)]
+                assert entered.wait(5)
+                release.set()
+                values = [task.result(timeout=5) for task in tasks]
+            assert calls == 1 and len({id(value) for value in values}) == 16
+            values[0].instance_id = "caller-mutation"
+            assert adapter.get_execution_instance().instance_id == "scope"
+            adapter._instance_cache = (time.monotonic() - 60, values[1])
+            assert adapter.get_execution_instance().issued_at == 2
+        finally:
+            release.set()
+            adapter._httpx_client.close()
+            adapter._sse_client.close()
+
+
+@pytest.mark.parametrize("code", ["operation_instance_mismatch", "operation_expired"])
+@pytest.mark.parametrize(
+    "method,args",
+    [
+        ("create_command_operation", ("saved.identity", "true")),
+        ("create_pty_operation", ("saved.identity",)),
+        ("get_execution_operation", ("command", "saved.identity")),
+    ],
+)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_async", [True, False])
+async def test_instance_invalidation_without_replay(code, method, args, is_async):
+    # Both adapters must discard an old in-flight result after invalidation.
+    async_entered, async_release = asyncio.Event(), asyncio.Event()
+    sync_entered, sync_release = threading.Event(), threading.Event()
+    gets = 0
+    operations = 0
+
+    def response(request):
+        nonlocal gets, operations
+        if request.url.path == "/execution/instance":
+            gets += 1
+            return instance_response(gets)
+        operations += 1
+        if request.method == "POST":
+            assert json.loads(request.content)["operation_id"] == "saved.identity"
+        else:
+            assert request.headers["X-EXECD-OPERATION-ID"] == "saved.identity"
+        return httpx.Response(409, json={"code": code, "message": "unknown outcome"})
+
+    async def async_handler(request):
+        result = response(request)
+        if request.url.path == "/execution/instance" and gets == 1:
+            async_entered.set()
+            await async_release.wait()
+        return result
+
+    def sync_handler(request):
+        result = response(request)
+        if request.url.path == "/execution/instance" and gets == 1:
+            sync_entered.set()
+            assert sync_release.wait(5)
+        return result
+
+    if is_async:
+        adapter = CommandsAdapter(
+            ConnectionConfig(), SandboxEndpoint(endpoint="localhost:44772")
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(async_handler),
+            base_url="http://localhost:44772",
+        ) as client:
+            adapter._client.set_async_httpx_client(client)
+            try:
+                old = asyncio.create_task(adapter.get_execution_instance())
+                await async_entered.wait()
+                with pytest.raises(SandboxApiException):
+                    await getattr(adapter, method)(*args)
+                assert (await adapter.get_execution_instance()).issued_at == 2
+                async_release.set()
+                assert (await old).issued_at == 1
+                assert (await adapter.get_execution_instance()).issued_at == 2
+            finally:
+                async_release.set()
+                await adapter._httpx_client.aclose()
+                await adapter._sse_client.aclose()
+    else:
+        adapter = CommandsAdapterSync(
+            ConnectionConfig(), SandboxEndpoint(endpoint="localhost:44772")
+        )
+        with httpx.Client(
+            transport=httpx.MockTransport(sync_handler),
+            base_url="http://localhost:44772",
+        ) as client:
+            adapter._client.set_httpx_client(client)
+            try:
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    old = pool.submit(adapter.get_execution_instance)
+                    assert sync_entered.wait(5)
+                    with pytest.raises(SandboxApiException):
+                        getattr(adapter, method)(*args)
+                    assert adapter.get_execution_instance().issued_at == 2
+                    sync_release.set()
+                    assert old.result(timeout=5).issued_at == 1
+                    assert adapter.get_execution_instance().issued_at == 2
+            finally:
+                sync_release.set()
+                adapter._httpx_client.close()
+                adapter._sse_client.close()
+    assert gets == 2 and operations == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_async", [True, False])
+async def test_instance_failure_is_not_cached(is_async):
+    calls = 0
+
+    def handler(request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                503, json={"code": "unavailable", "message": "retry later"}
+            )
+        return instance_response()
+
+    if is_async:
+        adapter = CommandsAdapter(
+            ConnectionConfig(), SandboxEndpoint(endpoint="localhost:44772")
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="http://localhost:44772",
+        ) as client:
+            adapter._client.set_async_httpx_client(client)
+            try:
+                with pytest.raises(SandboxApiException):
+                    await adapter.get_execution_instance()
+                assert (await adapter.get_execution_instance()).instance_id == "scope"
+            finally:
+                await adapter._httpx_client.aclose()
+                await adapter._sse_client.aclose()
+    else:
+        adapter = CommandsAdapterSync(
+            ConnectionConfig(), SandboxEndpoint(endpoint="localhost:44772")
+        )
+        with httpx.Client(
+            transport=httpx.MockTransport(handler),
+            base_url="http://localhost:44772",
+        ) as client:
+            adapter._client.set_httpx_client(client)
+            try:
+                with pytest.raises(SandboxApiException):
+                    adapter.get_execution_instance()
+                assert adapter.get_execution_instance().instance_id == "scope"
+            finally:
+                adapter._httpx_client.close()
+                adapter._sse_client.close()
+    assert calls == 2

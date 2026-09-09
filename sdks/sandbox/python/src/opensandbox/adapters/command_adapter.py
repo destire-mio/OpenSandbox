@@ -21,8 +21,10 @@ This adapter handles command execution within sandboxes, providing both
 synchronous and streaming execution modes with proper session management.
 """
 
+import asyncio
 import json
 import logging
+import time
 from datetime import timedelta
 
 import httpx
@@ -147,6 +149,9 @@ class CommandsAdapter(Commands):
         """
         self.connection_config = connection_config
         self.execd_endpoint = execd_endpoint
+        self._instance_cache: tuple[float, ExecutionInstance] | None = None
+        self._instance_pending: asyncio.Task[ExecutionInstance] | None = None
+        self._instance_generation = 0
         from opensandbox.api.execd import Client
 
         protocol = self.connection_config.protocol
@@ -429,17 +434,59 @@ class CommandsAdapter(Commands):
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def get_execution_instance(self) -> ExecutionInstance:
-        """Get server scope/time; persist new_operation_id() before creation."""
+        """Get a server snapshot cached for at most 60 seconds; use for new IDs."""
+        cached = self._instance_cache
+        if cached is not None and time.monotonic() - cached[0] < 60:
+            return cached[1].model_copy()
+        pending = self._instance_pending
+        if pending is None:
+            pending = asyncio.create_task(
+                self._fetch_execution_instance(
+                    time.monotonic(), self._instance_generation
+                )
+            )
+            self._instance_pending = pending
+            pending.add_done_callback(self._finish_instance_fetch)
+        return (await asyncio.shield(pending)).model_copy()
+
+    def _finish_instance_fetch(self, pending: asyncio.Task[ExecutionInstance]) -> None:
+        if self._instance_pending is pending:
+            self._instance_pending = None
+        # A cancelled waiter must not cancel other waiters or leave an
+        # unobserved exception when the shared request subsequently finishes.
+        if not pending.cancelled():
+            pending.exception()
+
+    async def _fetch_execution_instance(
+        self, started: float, generation: int
+    ) -> ExecutionInstance:
         from opensandbox.adapters.converter.response_handler import require_parsed
         from opensandbox.api.execd.api.command import get_execution_instance
         from opensandbox.api.execd.models import ExecutionInstance as ApiInstance
 
-        response = await get_execution_instance.asyncio_detailed(client=await self._get_client())
+        response = await get_execution_instance.asyncio_detailed(
+            client=await self._get_client()
+        )
         handle_api_error(response, "Get execution instance")
         parsed = require_parsed(response, ApiInstance, "Get execution instance")
-        return ExecutionInstance.model_validate(parsed.to_dict())
+        result = ExecutionInstance.model_validate(parsed.to_dict())
+        if generation == self._instance_generation:
+            self._instance_cache = (started, result)
+        return result
 
-    async def get_execution_operation(self, kind: str, operation_id: str) -> ExecutionOperation:
+    def _handle_operation_error(self, response: object, action: str) -> None:
+        try:
+            handle_api_error(response, action)
+        except SandboxApiException as error:
+            if error.error.code in {"operation_instance_mismatch", "operation_expired"}:
+                self._instance_cache = None
+                self._instance_pending = None
+                self._instance_generation += 1
+            raise
+
+    async def get_execution_operation(
+        self, kind: str, operation_id: str
+    ) -> ExecutionOperation:
         """Recover a creation handle; never replace an expired or old-instance ID."""
         from opensandbox.adapters.converter.response_handler import require_parsed
         from opensandbox.api.execd.api.command import get_execution_operation
@@ -449,15 +496,20 @@ class CommandsAdapter(Commands):
         )
 
         response = await get_execution_operation.asyncio_detailed(
-            client=await self._get_client(), kind=GetExecutionOperationKind(kind),
+            client=await self._get_client(),
+            kind=GetExecutionOperationKind(kind),
             x_execd_operation_id=operation_id,
         )
-        handle_api_error(response, "Get execution operation")
+        self._handle_operation_error(response, "Get execution operation")
         parsed = require_parsed(response, ApiOperation, "Get execution operation")
         return ExecutionOperation.model_validate(parsed.to_dict())
 
     async def create_command_operation(
-        self, operation_id: str, command: str, *, opts: RunCommandOpts | None = None,
+        self,
+        operation_id: str,
+        command: str,
+        *,
+        opts: RunCommandOpts | None = None,
     ) -> ExecutionOperation:
         """Create/recover with a persisted identity. Returns JSON, not streamed output."""
         from opensandbox.adapters.converter.response_handler import require_parsed
@@ -466,16 +518,27 @@ class CommandsAdapter(Commands):
 
         if not operation_id:
             raise InvalidArgumentException("operation_id is required")
-        body = ExecutionConverter.to_api_run_command_request(command, opts or RunCommandOpts())
+        body = ExecutionConverter.to_api_run_command_request(
+            command, opts or RunCommandOpts()
+        )
         from opensandbox.api.execd.models import CreateCommandOperationRequest
-        creation_body = CreateCommandOperationRequest.from_dict({**body.to_dict(), "operation_id": operation_id})
-        response = await create_command_operation.asyncio_detailed(client=await self._get_client(), body=creation_body)
-        handle_api_error(response, "Create command operation")
+
+        creation_body = CreateCommandOperationRequest.from_dict(
+            {**body.to_dict(), "operation_id": operation_id}
+        )
+        response = await create_command_operation.asyncio_detailed(
+            client=await self._get_client(), body=creation_body
+        )
+        self._handle_operation_error(response, "Create command operation")
         parsed = require_parsed(response, ApiOperation, "Create command operation")
         return ExecutionOperation.model_validate(parsed.to_dict())
 
     async def create_pty_operation(
-        self, operation_id: str, *, cwd: str = "", command: str = "",
+        self,
+        operation_id: str,
+        *,
+        cwd: str = "",
+        command: str = "",
     ) -> ExecutionOperation:
         """Create/recover a dormant PTY; attach its ID with the existing WS protocol."""
         from opensandbox.adapters.converter.response_handler import require_parsed
@@ -487,8 +550,10 @@ class CommandsAdapter(Commands):
             raise InvalidArgumentException("operation_id is required")
         response = await create_pty_operation.asyncio_detailed(
             client=await self._get_client(),
-            body=CreatePTYOperationRequest(operation_id=operation_id, cwd=cwd, command=command),
+            body=CreatePTYOperationRequest(
+                operation_id=operation_id, cwd=cwd, command=command
+            ),
         )
-        handle_api_error(response, "Create PTY operation")
+        self._handle_operation_error(response, "Create PTY operation")
         parsed = require_parsed(response, ApiOperation, "Create PTY operation")
         return ExecutionOperation.model_validate(parsed.to_dict())

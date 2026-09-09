@@ -17,6 +17,7 @@ package runtime
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"maps"
 	"regexp"
 	"strconv"
@@ -28,10 +29,12 @@ import (
 
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
+	"github.com/alibaba/opensandbox/execd/pkg/telemetry"
 )
 
 const operationRetention = 24 * time.Hour
 const operationCapacity = 4096
+const operationStateCreating = "creating"
 
 // OperationInstance identifies a controller lifetime, not a durable execution store.
 type OperationInstance struct {
@@ -65,15 +68,17 @@ type operationKey struct {
 type creationRecord struct {
 	operation   Operation
 	fingerprint [32]byte
+	claimedAt   time.Time
 }
 type creationRegistry struct {
 	sync.Mutex
 	once     sync.Once
 	instance string
 	records  map[operationKey]*creationRecord
-	// Internal clock and cap permit deterministic lifecycle tests, not public configuration.
+	// The clock permits deterministic lifecycle tests. Capacity is set at startup.
 	now      func() time.Time
 	capacity int
+	accepted bool
 }
 
 func (c *Controller) initOperations() {
@@ -87,7 +92,25 @@ func (c *Controller) initOperations() {
 
 func (c *Controller) GetOperationInstance() OperationInstance {
 	c.initOperations()
+	c.operations.Lock()
+	defer c.operations.Unlock()
 	return OperationInstance{c.operations.instance, c.operations.now().Unix(), int64(operationRetention / time.Second), c.operations.capacity}
+}
+
+// ConfigureOperationCapacity must run before accepting operations. It never
+// evicts an identity to satisfy a smaller limit.
+func (c *Controller) ConfigureOperationCapacity(capacity int) error {
+	if capacity <= 0 {
+		return operationError("invalid_operation_capacity", "operation capacity must be positive")
+	}
+	c.initOperations()
+	c.operations.Lock()
+	defer c.operations.Unlock()
+	if c.operations.accepted {
+		return operationError("invalid_operation_capacity", "configure operation capacity before accepting operations")
+	}
+	c.operations.capacity = capacity
+	return nil
 }
 
 var operationTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{8,128}$`)
@@ -110,36 +133,62 @@ func (c *Controller) operationExpiry(identity string) (time.Time, error) {
 	return time.Unix(issued, 0).Add(operationRetention), nil
 }
 
-func (c *Controller) claimOperation(principal, kind, identity string, payload any) (*creationRecord, bool, error) {
+func (c *Controller) claimOperation(principal, kind, identity string, payload any) (record *creationRecord, owner bool, err error) {
+	defer func() {
+		result := "recovered"
+		if owner {
+			result = "claimed"
+		}
+		telemetry.RecordOperationResult(kind, "create", operationResultCode(err, result))
+	}()
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return nil, false, operationError("invalid_operation_request", "cannot fingerprint operation request")
 	}
 	fingerprint := sha256.Sum256(encoded)
 	c.initOperations()
-	c.operations.Lock()
-	defer c.operations.Unlock()
 	expiry, err := c.operationExpiry(identity)
 	if err != nil {
 		return nil, false, err
 	}
-	c.cleanupOperationsLocked()
 	key := operationKey{sha256.Sum256([]byte(principal)), kind, identity}
-	if entry := c.operations.records[key]; entry != nil {
-		if entry.fingerprint != fingerprint {
-			return nil, false, operationError("operation_conflict", "operation identity was used with a different request")
+	swept := false
+	for {
+		entry := c.retainedOperation(key)
+		c.operations.Lock()
+		// Lifecycle checks happen outside this lock; recheck creator ownership.
+		if c.operations.records[key] != entry {
+			c.operations.Unlock()
+			continue
 		}
-		return entry, false, nil
+		if entry != nil {
+			c.operations.Unlock()
+			if entry.fingerprint != fingerprint {
+				return nil, false, operationError("operation_conflict", "operation identity was used with a different request")
+			}
+			return entry, false, nil
+		}
+		if !c.operations.now().Before(expiry) {
+			c.operations.Unlock()
+			return nil, false, operationError("operation_expired", "recovery window expired; previous execution outcome is unknown, creation refused")
+		}
+		if len(c.operations.records) < c.operations.capacity {
+			entry = &creationRecord{
+				operation:   Operation{c.newContextID(), kind, operationStateCreating, expiry},
+				fingerprint: fingerprint, claimedAt: c.operations.now(),
+			}
+			c.operations.records[key] = entry
+			c.operations.accepted = true
+			c.operations.Unlock()
+			return entry, true, nil
+		}
+		c.operations.Unlock()
+		if swept {
+			return nil, false, operationError("operation_capacity_exceeded", "operation recovery capacity reached; creation refused")
+		}
+		c.cleanupOperations()
+		swept = true
 	}
-	if !c.operations.now().Before(expiry) {
-		return nil, false, operationError("operation_expired", "recovery window expired; previous execution outcome is unknown, creation refused")
-	}
-	if len(c.operations.records) >= c.operations.capacity {
-		return nil, false, operationError("operation_capacity_exceeded", "operation recovery capacity reached; creation refused")
-	}
-	entry := &creationRecord{Operation{c.newContextID(), kind, "creating", expiry}, fingerprint}
-	c.operations.records[key] = entry
-	return entry, true, nil
 }
 
 func (c *Controller) operationSnapshot(entry *creationRecord) Operation {
@@ -150,7 +199,7 @@ func (c *Controller) operationSnapshot(entry *creationRecord) Operation {
 func (c *Controller) finishCreation(entry *creationRecord, failed bool) {
 	c.operations.Lock()
 	defer c.operations.Unlock()
-	if entry.operation.State != "creating" {
+	if entry.operation.State != operationStateCreating {
 		return
 	}
 	entry.operation.State = "created"
@@ -160,10 +209,11 @@ func (c *Controller) finishCreation(entry *creationRecord, failed bool) {
 }
 
 // GetOperation is a private lookup, never an inventory of caller identities or inputs.
-func (c *Controller) GetOperation(principal, kind, identity string) (Operation, error) {
+func (c *Controller) GetOperation(principal, kind, identity string) (op Operation, err error) {
+	defer func() {
+		telemetry.RecordOperationResult(kind, "lookup", operationResultCode(err, "recovered"))
+	}()
 	c.initOperations()
-	c.operations.Lock()
-	defer c.operations.Unlock()
 	if kind != "command" && kind != "pty" {
 		return Operation{}, operationError("invalid_operation_kind", "kind must be command or pty")
 	}
@@ -171,9 +221,8 @@ func (c *Controller) GetOperation(principal, kind, identity string) (Operation, 
 	if err != nil {
 		return Operation{}, err
 	}
-	c.cleanupOperationsLocked()
-	if entry := c.operations.records[operationKey{sha256.Sum256([]byte(principal)), kind, identity}]; entry != nil {
-		return entry.operation, nil
+	if entry := c.retainedOperation(operationKey{sha256.Sum256([]byte(principal)), kind, identity}); entry != nil {
+		return c.operationSnapshot(entry), nil
 	}
 	if !c.operations.now().Before(expiry) {
 		return Operation{}, operationError("operation_expired", "recovery window expired; previous execution outcome is unknown")
@@ -181,27 +230,100 @@ func (c *Controller) GetOperation(principal, kind, identity string) (Operation, 
 	return Operation{}, operationError("operation_not_found", "operation not found in this authenticated execd instance")
 }
 
-func (c *Controller) cleanupOperationsLocked() {
-	now := c.operations.now()
-	for key, entry := range c.operations.records {
-		if entry.operation.State == "creating" || now.Before(entry.operation.ExpiresAt) {
-			continue
+func (c *Controller) retainedOperation(key operationKey) *creationRecord {
+	c.operations.Lock()
+	entry := c.operations.records[key]
+	c.operations.Unlock()
+	if entry != nil && c.expireOperation(key, entry) {
+		return nil
+	}
+	return entry
+}
+
+// Lifecycle checks and resource closure must not hold the registry mutex.
+// PTY expiry excludes startup using that session's mutex.
+func (c *Controller) expireOperation(key operationKey, entry *creationRecord) bool {
+	c.operations.Lock()
+	if c.operations.records[key] != entry {
+		c.operations.Unlock()
+		return true
+	}
+	op := entry.operation
+	eligible := op.State != operationStateCreating && !c.operations.now().Before(op.ExpiresAt)
+	c.operations.Unlock()
+	if !eligible {
+		return false
+	}
+	if op.Kind == "command" {
+		if kernel := c.commandSnapshot(op.ID); kernel != nil && kernel.running {
+			return false
 		}
-		if entry.operation.Kind == "command" {
-			if kernel := c.commandSnapshot(entry.operation.ID); kernel != nil && kernel.running {
-				continue
-			}
-		} else if !c.expireOperationPTY(entry.operation.ID) {
-			continue
-		}
+	} else if !c.expireOperationPTY(op.ID) {
+		return false
+	}
+	c.operations.Lock()
+	if c.operations.records[key] == entry {
 		delete(c.operations.records, key)
 	}
+	c.operations.Unlock()
+	return true
 }
+
 func (c *Controller) cleanupOperations() {
 	c.initOperations()
 	c.operations.Lock()
+	candidates := make(map[operationKey]*creationRecord)
+	now := c.operations.now()
+	for key, entry := range c.operations.records {
+		if entry.operation.State != operationStateCreating && !now.Before(entry.operation.ExpiresAt) {
+			candidates[key] = entry
+		}
+	}
+	c.operations.Unlock()
+	for key, entry := range candidates {
+		c.expireOperation(key, entry)
+	}
+}
+
+func operationResultCode(err error, success string) string {
+	if err == nil {
+		return success
+	}
+	var failure *OperationError
+	if errors.As(err, &failure) {
+		switch failure.Code {
+		case "operation_conflict", "operation_expired", "operation_capacity_exceeded", "operation_instance_mismatch", "operation_not_found":
+			return failure.Code
+		}
+	}
+	return "invalid"
+}
+
+// OperationStats reads bounded metadata without lifecycle checks or cleanup.
+func (c *Controller) OperationStats() telemetry.OperationStats {
+	c.initOperations()
+	c.operations.Lock()
 	defer c.operations.Unlock()
-	c.cleanupOperationsLocked()
+	stats := telemetry.OperationStats{Capacity: int64(c.operations.capacity)}
+	now := c.operations.now()
+	for _, entry := range c.operations.records {
+		kind := 0
+		if entry.operation.Kind == "pty" {
+			kind = 1
+		}
+		state := 0
+		switch entry.operation.State {
+		case "created":
+			state = 1
+		case "failed":
+			state = 2
+		}
+		stats.Records[kind][state]++
+		if state == 0 {
+			stats.OldestCreatingAge = max(stats.OldestCreatingAge, now.Sub(entry.claimedAt).Seconds())
+		}
+	}
+	return stats
 }
 
 // CreateCommandOperation claims before scheduling any process creation. It never uses
@@ -269,8 +391,10 @@ func (c *Controller) CreatePTYOperation(principal, identity, cwd, command string
 		return Operation{}, err
 	}
 	if owner {
-		_, err := c.createPTYSession(entry.operation.ID, cwd, command, true)
-		c.finishCreation(entry, err != nil)
+		safego.Go(func() {
+			_, err := c.createPTYSession(entry.operation.ID, cwd, command, true)
+			c.finishCreation(entry, err != nil)
+		})
 	}
 	return c.operationSnapshot(entry), nil
 }

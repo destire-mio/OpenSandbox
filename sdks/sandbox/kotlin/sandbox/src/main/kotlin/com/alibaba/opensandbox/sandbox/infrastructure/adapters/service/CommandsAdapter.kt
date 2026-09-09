@@ -28,6 +28,7 @@ import com.alibaba.opensandbox.sandbox.api.models.execd.CreateCommandOperationRe
 import com.alibaba.opensandbox.sandbox.api.models.execd.CreatePTYOperationRequest
 import com.alibaba.opensandbox.sandbox.api.models.execd.EventNode
 import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxException
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.CommandLogs
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.CommandStatus
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution
@@ -52,6 +53,9 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import org.slf4j.LoggerFactory
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.TimeUnit
 import com.alibaba.opensandbox.sandbox.api.models.execd.CreateSessionRequest as CreateSessionRequestApi
 import com.alibaba.opensandbox.sandbox.api.models.execd.ExecutionOperation as ApiExecutionOperation
 import com.alibaba.opensandbox.sandbox.api.models.execd.RunInSessionRequest as RunInSessionRequestApi
@@ -70,6 +74,11 @@ internal class CommandsAdapter(
     }
 
     private val logger = LoggerFactory.getLogger(CommandsAdapter::class.java)
+    private val instanceLock = Any()
+    private var cachedInstance: ExecutionInstance? = null
+    private var instanceFetchedAt = 0L
+    private var instanceGeneration = 0L
+    private var instancePending: CompletableFuture<ExecutionInstance>? = null
     private val execdBaseUrl = "${httpClientProvider.config.protocol}://${execdEndpoint.endpoint}"
     private val execdApiClient =
         httpClientProvider.httpClient.newBuilder()
@@ -90,12 +99,60 @@ internal class CommandsAdapter(
     private fun ApiExecutionOperation.toOperation(): ExecutionOperation = ExecutionOperation(id, kind.value, state.value, expiresAt)
 
     override fun getExecutionInstance(): ExecutionInstance {
+        var owner = false
+        val pending: CompletableFuture<ExecutionInstance>
+        val generation: Long
+        val started: Long
+        synchronized(instanceLock) {
+            cachedInstance?.let {
+                if (System.nanoTime() - instanceFetchedAt < TimeUnit.MINUTES.toNanos(1)) return it.copy()
+            }
+            pending = instancePending ?: CompletableFuture<ExecutionInstance>().also {
+                instancePending = it
+                owner = true
+            }
+            generation = instanceGeneration
+            started = System.nanoTime()
+        }
+        if (owner) {
+            try {
+                val instance = commandApi.getExecutionInstance()
+                val result = ExecutionInstance(instance.instanceId, instance.issuedAt, instance.retentionSeconds, instance.capacity)
+                synchronized(instanceLock) {
+                    if (generation == instanceGeneration) {
+                        cachedInstance = result
+                        instanceFetchedAt = started
+                    }
+                }
+                pending.complete(result)
+            } catch (e: Exception) {
+                pending.completeExceptionally(e.toSandboxException())
+            } finally {
+                synchronized(instanceLock) {
+                    if (instancePending === pending) instancePending = null
+                }
+            }
+        }
         try {
-            val instance = commandApi.getExecutionInstance()
-            return ExecutionInstance(instance.instanceId, instance.issuedAt, instance.retentionSeconds, instance.capacity)
-        } catch (e: Exception) {
+            return pending.get().copy()
+        } catch (e: ExecutionException) {
+            throw (e.cause as? RuntimeException ?: e.toSandboxException())
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
             throw e.toSandboxException()
         }
+    }
+
+    private fun operationException(error: Exception): SandboxException {
+        val converted = error.toSandboxException()
+        if (converted.error.code in setOf("operation_instance_mismatch", "operation_expired")) {
+            synchronized(instanceLock) {
+                cachedInstance = null
+                instancePending = null
+                instanceGeneration++
+            }
+        }
+        return converted
     }
 
     override fun getExecutionOperation(
@@ -105,7 +162,7 @@ internal class CommandsAdapter(
         try {
             return commandApi.getExecutionOperation(CommandApi.KindGetExecutionOperation.valueOf(kind), operationId).toOperation()
         } catch (e: Exception) {
-            throw e.toSandboxException()
+            throw operationException(e)
         }
     }
 
@@ -129,7 +186,7 @@ internal class CommandsAdapter(
                 ),
             ).toOperation()
         } catch (e: Exception) {
-            throw e.toSandboxException()
+            throw operationException(e)
         }
     }
 
@@ -144,7 +201,7 @@ internal class CommandsAdapter(
                 CreatePTYOperationRequest(operationId = operationId, cwd = cwd, command = command),
             ).toOperation()
         } catch (e: Exception) {
-            throw e.toSandboxException()
+            throw operationException(e)
         }
     }
 

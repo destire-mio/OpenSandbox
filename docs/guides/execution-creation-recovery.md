@@ -21,7 +21,7 @@ per HTTP attempt is not an operation identity.
 ## Using the API
 
 1. Authenticated `GET /execution/instance` returns `instance_id`, `issued_at` (server
-   Unix seconds), `retention_seconds` (86400), and `capacity` (4096).
+   Unix seconds), `retention_seconds` (86400), and configured `capacity` (4096 by default).
 2. Generate an 8–128 character random token using letters, digits, `_` or `-`.
    Form `<instance_id>.<issued_at>.<token>` and persist the full string and request.
 3. Send that identity as required `operation_id` in `POST /command/operations` or `POST /pty/operations`.
@@ -85,6 +85,29 @@ In C#, import `OpenSandbox.Services` for the `IExecdCommands` extension methods.
 They use the additive `IExecutionOperations` capability implemented by the standard
 adapter, preserving the existing interface on all supported target frameworks.
 
+### Instance caching for new operations
+
+Call the SDK's instance method for each **new logical operation**, then generate
+and save its ID. Standard Python async/sync, JavaScript, Go, Kotlin and C# clients
+reuse a private instance snapshot for at most 60 seconds from the start of its
+fetch, measured with a monotonic clock. Concurrent cache misses share one fetch.
+Returned snapshots are independent of the cache. Failed fetches are not cached.
+The raw HTTP endpoint continues to return the current server scope and time.
+
+The cache avoids one network round-trip per command in a busy agent loop. Its age
+reduces the remaining recovery window: an ID containing yesterday's server time
+does not gain a new 24-hour window when generated today. Do not keep a returned
+instance object as a permanent ID source; obtain it through the SDK method for
+each new operation. The maximum additional reduction due to cache reuse is 60
+seconds, apart from request transit time. The returned operation's `expires_at`
+is the authoritative deadline.
+
+An operation's `operation_instance_mismatch` or `operation_expired` response
+invalidates the SDK cache for future operations and is returned to the caller.
+It never regenerates an ID or resends a create request. Reconciliation always
+loads the saved original ID; refreshing the instance is not recovery of an
+unknown execution.
+
 ## Scope and request matching
 
 The namespace is one authenticated runtime controller/sandbox and resource kind.
@@ -134,9 +157,12 @@ outcome. Caller restart within the same daemon/window is the supported scenario.
 
 Identities remain recoverable for 24 hours from their encoded server timestamp,
 not from the last retry. Creating and active executions survive that deadline.
-The registry holds at most 4096 entries, including creating/active/failed entries.
-Expired terminal records are removed on lookup/admission and by the existing hourly
-command janitor. Dormant and terminal keyed PTY sessions expire with their records;
+The registry holds at most the configured capacity, including creating, active,
+successful and failed entries. Lookups and duplicate creates check only their
+own record. Capacity pressure and the existing hourly command janitor collect
+expired records. PTY lifecycle checks and resource closure run outside the registry
+mutex, so cleaning one session does not lock out unrelated recovery requests.
+Dormant and terminal keyed PTY sessions expire with their records;
 launch and expiration synchronize through the same session lock. Active PTYs are
 never evicted for capacity or age. Legacy command status/output cleanup remains
 separate (24 hours after completion). Explicit PTY deletion may remove the resource
@@ -148,6 +174,23 @@ with a new timestamp is unsafe. A controller stuck after claiming but before
 finishing creation retains `creating` until its lifecycle ends; it does not guess
 that launching again is safe.
 
+### Capacity and observability
+
+Set `--operation-capacity` or `EXECD_OPERATION_CAPACITY` to a positive integer
+(default 4096); the flag overrides the environment. Configure capacity at startup,
+before accepting operations. Instance discovery reports the actual value.
+Keep room for the expected new-operation rate multiplied by the 24-hour window,
+plus creating or active executions that outlive it. Successful short commands
+consume retained slots too. A full registry rejects new identities with 503;
+existing identities remain recoverable. Failed records retain the same result
+for the full window, rather than becoming permission to try the same identity again.
+
+Existing OpenTelemetry export includes `execd.operation.requests` by `kind`,
+`action` and `result`; `execd.operation.records` by `kind` and `state`;
+`execd.operation.capacity`; and `execd.operation.creating.oldest_age` in seconds.
+The latter reports age, not a determination that a launch is safe to retry.
+These metrics contain no operation IDs, handles, principals or request content.
+
 ## PTY connections
 
 `POST /pty` creates a dormant session; it does not start a shell. After recovering
@@ -156,6 +199,12 @@ replay and `takeover=1` apply. A keyed session permits one launch attempt. After
 process exit, reconnect replays the retained output and terminal event rather than
 starting another shell. A failed launch is not retried by reconnecting. Unkeyed
 sessions preserve their previous behavior.
+
+The keyed `POST /pty/operations` claims its record before scheduling directory
+and session creation in the background. A `202 creating` response may precede
+session availability; wait for `created` before attaching. Filesystem failure
+becomes a retained `failed` creation. Both command and PTY creation are owned by
+the runtime after the claim, independently of the originating HTTP connection.
 
 ## Guarantee
 

@@ -17,11 +17,133 @@
 package runtime
 
 import (
-	"github.com/stretchr/testify/require"
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
+
+type operationBlockingClose struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (c *operationBlockingClose) Write(p []byte) (int, error) { return len(p), nil }
+func (c *operationBlockingClose) Close() error {
+	close(c.entered)
+	<-c.release
+	return nil
+}
+
+func TestOperationCleanupDoesNotBlockUnrelatedRecovery(t *testing.T) {
+	for _, slowClose := range []bool{false, true} {
+		t.Run(fmt.Sprintf("slowClose=%v", slowClose), func(t *testing.T) {
+			c := NewController("", "")
+			c.initOperations()
+			now := time.Unix(1700000000, 0)
+			c.operations.now = func() time.Time { return now }
+			key := testOperationID(c, "old-pty-session")
+			_, err := c.CreatePTYOperation("owner", key, "", "")
+			require.NoError(t, err)
+			old := awaitOperationCreated(t, c, "pty", key)
+			now = now.Add(23 * time.Hour)
+			freshKey := testOperationID(c, "fresh-command")
+			fresh, _, err := c.claimOperation("owner", "command", freshKey, "same")
+			require.NoError(t, err)
+			c.finishCreation(fresh, false)
+			now = now.Add(time.Hour + time.Second)
+			session := c.getPTYSession(old.ID)
+			var cleanupDone chan struct{}
+			if slowClose {
+				closer := &operationBlockingClose{make(chan struct{}), make(chan struct{})}
+				session.stdin = closer
+				cleanupDone = make(chan struct{})
+				go func() { c.cleanupOperations(); close(cleanupDone) }()
+				<-closer.entered
+				defer func() { close(closer.release); <-cleanupDone }()
+			} else {
+				session.mu.Lock()
+				defer session.mu.Unlock()
+			}
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				if slowClose {
+					// A second collector must not close resources already being released.
+					_, err := c.GetOperation("owner", "pty", key)
+					if err == nil {
+						t.Error("expired session remained recoverable")
+					}
+				}
+				op, err := c.GetOperation("owner", "command", freshKey)
+				if err != nil || op.ID != fresh.operation.ID {
+					t.Errorf("unrelated lookup: %v %v", op, err)
+				}
+				retry, owner, err := c.claimOperation("owner", "command", freshKey, "same")
+				if err != nil || owner || retry != fresh {
+					t.Errorf("duplicate recovery: %v %v", owner, err)
+				}
+				_, _, err = c.claimOperation("owner", "command", testOperationID(c, "new-command"), "new")
+				if err != nil {
+					t.Errorf("new admission below capacity: %v", err)
+				}
+			}()
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("unrelated operation blocked behind an expired PTY")
+			}
+		})
+	}
+}
+
+func TestOperationExpiryAndPTYLaunchRace(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		c := NewController("", "")
+		c.initOperations()
+		now := time.Unix(1700000000, 0)
+		c.operations.now = func() time.Time { return now }
+		key := testOperationID(c, fmt.Sprintf("launch-race-%08d", i))
+		_, err := c.CreatePTYOperation("owner", key, "", "read value")
+		require.NoError(t, err)
+		op := awaitOperationCreated(t, c, "pty", key)
+		session := c.getPTYSession(op.ID)
+		require.True(t, session.LockWS())
+		now = now.Add(operationRetention + time.Second)
+		gate := make(chan struct{})
+		launched := make(chan error, 1)
+		expired := make(chan bool, 1)
+		c.operations.Lock()
+		registryKey := operationKey{sha256.Sum256([]byte("owner")), "pty", key}
+		entry := c.operations.records[registryKey]
+		c.operations.Unlock()
+		go func() { <-gate; launched <- session.StartPipe() }()
+		go func() { <-gate; expired <- c.expireOperation(registryKey, entry) }()
+		close(gate)
+		launchErr, wasExpired := <-launched, <-expired
+		if launchErr == nil {
+			require.False(t, wasExpired)
+			recovered, err := c.GetOperation("owner", "pty", key)
+			require.NoError(t, err)
+			require.Equal(t, op.ID, recovered.ID)
+			_, err = session.WriteStdin([]byte("done\n"))
+			require.NoError(t, err)
+			select {
+			case <-session.Done():
+			case <-time.After(5 * time.Second):
+				t.Fatal("PTY did not exit")
+			}
+		} else {
+			require.True(t, wasExpired)
+		}
+		require.Error(t, session.StartPipe())
+		session.UnlockWS()
+		_ = c.DeletePTYSession(op.ID)
+	}
+}
 
 func TestOperationPTYFailedLaunchNeverReattempts(t *testing.T) {
 	for _, pipe := range []bool{false, true} {
@@ -32,8 +154,10 @@ func TestOperationPTYFailedLaunchNeverReattempts(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			c := NewController("", "")
 			cwd := t.TempDir()
-			op, err := c.CreatePTYOperation("owner", testOperationID(c, "failed-pty-start"), cwd, "true")
+			key := testOperationID(c, "failed-pty-start")
+			op, err := c.CreatePTYOperation("owner", key, cwd, "true")
 			require.NoError(t, err)
+			awaitOperationCreated(t, c, "pty", key)
 			s := c.GetPTYSession(op.ID)
 			defer c.DeletePTYSession(op.ID)
 			require.True(t, s.LockWS())
@@ -59,9 +183,11 @@ func TestOperationPTYRetention(t *testing.T) {
 	dormantKey := testOperationID(c, "dormant-pty")
 	dormant, err := c.CreatePTYOperation("owner", dormantKey, "", "")
 	require.NoError(t, err)
+	awaitOperationCreated(t, c, "pty", dormantKey)
 	activeKey := testOperationID(c, "active-pty")
 	active, err := c.CreatePTYOperation("owner", activeKey, "", "read value")
 	require.NoError(t, err)
+	awaitOperationCreated(t, c, "pty", activeKey)
 	session := c.GetPTYSession(active.ID)
 	require.NotNil(t, session)
 	require.True(t, session.LockWS())

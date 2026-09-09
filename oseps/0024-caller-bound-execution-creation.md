@@ -55,11 +55,17 @@ Sensitive command/env data is used only to compute an internal SHA-256 request f
 
 ## Design Details
 
-The existing `runtime.Controller` owns a bounded creation registry. Its entries contain only reserved handle, kind, fingerprint, creation disposition and expiry. Command state stays in `commandKernel`; PTY state stays in `ptySession`. The command launch path uses a reserved ID, registers the existing kernel, and publishes the creation result. Lookup does not maintain a parallel copy of exit status or output.
+The existing `runtime.Controller` owns a bounded creation registry. Its entries contain only reserved handle, kind, fingerprint, creation disposition, claim time and expiry. Command state stays in `commandKernel`; PTY state stays in `ptySession`. The command launch path uses a reserved ID, registers the existing kernel, and publishes the creation result. Lookup does not maintain a parallel copy of exit status or output.
 
 Under a registry mutex, a claim checks instance, retention, capacity and fingerprint. Only an absent valid identity can obtain creator ownership. Matching duplicates return the original handle even while startup is pending; mismatches return HTTP 409. Validation that depends on filesystem state belongs to the creator, not recovery. Static validation includes field types, positive timeout and UID/GID constraints.
 
-Retention is 24 hours from the encoded server timestamp, extended while creating/active; cap is 4096 total records per controller. Expired inactive records are collected on admission/lookup and by the existing hourly janitor. Because the timestamp remains in the supplied identity, an evicted expired token can be rejected without permanent tombstones. Expiry can remove dormant or terminal keyed PTY resources, never active sessions. Existing known-ID command retention stays independent. Explicit deletion can invalidate a handle while its creation record remains; retry still cannot recreate it.
+Retention is 24 hours from the encoded server timestamp, extended while creating/active; the default cap is 4096 total records per controller, configurable at startup with `--operation-capacity` / `EXECD_OPERATION_CAPACITY`. Instance discovery advertises the actual capacity. Successful and failed records use the same recovery contract. Lookups and duplicate creates check their target record; capacity pressure and the hourly janitor collect other expired records. Lifecycle checks and resource closure run outside the registry mutex, with record identity rechecked before deletion. PTY's own mutex arbitrates expiry versus launch. Because the timestamp remains in the supplied identity, an evicted expired token can be rejected without permanent tombstones. Expiry can remove dormant or terminal keyed PTY resources, never active sessions. Existing known-ID command retention stays independent. Explicit deletion can invalidate a handle while its creation record remains; retry still cannot recreate it.
+
+Both keyed creation paths schedule runtime-owned background creation after claiming. PTY directory creation may wait on the filesystem, so callers can receive `202 creating` before the dormant session exists. They wait for `created` before attaching.
+
+The five standard SDKs cache instance discovery for at most 60 monotonic seconds from fetch start and share concurrent fetches. Each caller receives an independent snapshot. New logical operations go through the instance getter; recovery loads the saved ID. Expiry and instance mismatch invalidate the cache for future operations while returning the original error, without resending creation. Cached server time reduces the remaining recovery window and is never a permanent ID source.
+
+The existing OpenTelemetry module exports bounded request outcomes, occupancy by kind/state, configured capacity and the oldest unresolved creation's age. No caller identity, operation ID, handle or request content becomes a metric label.
 
 Fingerprint inputs are command text, cwd, background, timeout, uid, gid and environment map; PTY uses command/cwd. Canonical typed JSON sorts map keys and normalizes absent/empty env maps. Do not trim command strings or infer shell equivalence. Unknown keyed request fields are rejected. Daemon environment is resolved at the winning launch; PTY/pipe mode follows the first WebSocket launch and is not a POST parameter.
 
@@ -74,7 +80,7 @@ Fingerprint inputs are command text, cwd, background, timeout, uid, gid and envi
 
 ## Drawbacks
 
-The identity is structured rather than entirely opaque, and creation requires one initial scope/time lookup. Fixed retention/cap impose an admission ceiling. Keyed foreground creation returns acknowledgement only, so clients needing output should select background logs or use future SSE-resumption work. A stuck creating entry consumes capacity until controller restart. This chooses duplicate prevention over speculative recovery.
+The identity is structured rather than entirely opaque, and creation requires an initial scope/time lookup with periodic SDK cache refresh. Fixed retention and configured capacity impose an admission ceiling. Keyed foreground creation returns acknowledgement only, so clients needing output should select background logs or use future SSE-resumption work. A stuck creating entry consumes capacity until controller restart. This chooses duplicate prevention over speculative recovery.
 
 ## Alternatives
 
