@@ -3,15 +3,15 @@ title: Caller-bound execution creation
 authors:
   - "@destire-mio"
 creation-date: 2026-09-08
-last-updated: 2026-09-09
+last-updated: 2026-09-10
 status: draft
 ---
 
-# OSEP-0023: Caller-bound execution creation
+# OSEP-0024: Caller-bound execution creation
 
 ## Summary
 
-Opt-in caller-bound operation identities recover command and PTY create handles after a lost response or caller crash, without creating a second process. This proposal and experimental implementation address #1547 and are pending maintainer design review. Proposal number 0023 is provisional and must be reassigned if upstream allocates it first.
+Opt-in caller-bound operation identities recover command and PTY create handles after a lost response or caller crash, without creating a second process. This proposal and experimental implementation address #1547 and are pending maintainer design review. Proposal number 0024 is provisional and must be reassigned if upstream allocates it first.
 
 ## Motivation
 
