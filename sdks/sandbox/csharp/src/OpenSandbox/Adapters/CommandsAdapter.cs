@@ -173,23 +173,51 @@ internal sealed class CommandsAdapter : IExecdCommands, IExecutionOperations
         return OperationAsync(() => _client.PostAsync<ExecutionOperation>("/pty/operations", new { operation_id = operationId, cwd, command }, cancellationToken));
     }
 
-    public async IAsyncEnumerable<ServerStreamEvent> RunStreamAsync(
+    public IAsyncEnumerable<ServerStreamEvent> RunStreamAsync(
         string command,
         RunCommandOptions? options = null,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default)
     {
         ValidateRunOptions(options);
-        _logger.LogDebug("Running command stream (commandLength={CommandLength})", command.Length);
+        return RunRequestStreamAsync(BuildRunCommandRequest(command, options), cancellationToken);
+    }
 
+    public IAsyncEnumerable<ServerStreamEvent> RunStreamAsync(
+        IReadOnlyList<string> argv,
+        RunCommandOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateRunOptions(options);
+        if (argv is null || argv.Count == 0 || string.IsNullOrEmpty(argv[0]) || argv.Any(arg => arg is null || arg.Contains('\0')))
+            throw new InvalidArgumentException("Argv requires a non-empty executable and strings without NUL");
+        var request = BuildRunCommandRequest(null, options);
+        request.Argv = argv.ToArray();
+        return RunRequestStreamAsync(request, cancellationToken);
+    }
+
+    private async IAsyncEnumerable<ServerStreamEvent> RunRequestStreamAsync(
+        RunCommandRequest request,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
         var spec = new StreamingRequestSpec(
             Url: $"{_baseUrl}/command",
-            Body: BuildRunCommandRequest(command, options),
+            Body: request,
             ErrorMessage: "Run command failed");
-
         await foreach (var ev in StreamExecutionAsync(spec, cancellationToken).ConfigureAwait(false))
         {
             yield return ev;
         }
+    }
+
+    public Task<Execution> RunAsync(
+        IReadOnlyList<string> argv,
+        RunCommandOptions? options = null,
+        ExecutionHandlers? handlers = null,
+        CancellationToken cancellationToken = default)
+    {
+        return ConsumeExecutionAsync(
+            RunStreamAsync(argv, options, cancellationToken), handlers,
+            inferExitCode: !(options?.Background ?? false), cancellationToken);
     }
 
     public async Task<Execution> RunAsync(
@@ -386,7 +414,7 @@ internal sealed class CommandsAdapter : IExecdCommands, IExecutionOperations
         return !string.IsNullOrEmpty(workingDirectory) ? new { cwd = workingDirectory } : null;
     }
 
-    private static RunCommandRequest BuildRunCommandRequest(string command, RunCommandOptions? options)
+    private static RunCommandRequest BuildRunCommandRequest(string? command, RunCommandOptions? options)
     {
         return new RunCommandRequest
         {

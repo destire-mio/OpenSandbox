@@ -13,7 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Pinned pre-recovery protocol: adding required methods must fail this fixture.
+# Upstream command protocol (including argv), without recovery methods:
+# adding required recovery methods must fail this fixture.
 from datetime import timedelta
 from typing import Protocol
 
@@ -30,7 +31,7 @@ from opensandbox.sync.services.command import CommandsSync, get_execution_operat
 class LegacyCommands(Protocol):
     def run(
         self,
-        command: str,
+        command: str | list[str],
         *,
         opts: RunCommandOpts | None = None,
         handlers: ExecutionHandlersSync | None = None,

@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
@@ -35,7 +35,6 @@ T = TypeVar("T", bound="CreateCommandOperationRequest")
 class CreateCommandOperationRequest:
     """
     Attributes:
-        command (str): Shell command to execute Example: ls -la /workspace.
         operation_id (str): Optional caller identity: <instance_id>.<issued_at Unix seconds>.<8-128 character random
             token>. Obtain instance_id and issued_at from GET /execution/instance, generate token and persist the entire ID
             before sending. Scope is the authenticated execd controller and kind; clients sharing its configured token share
@@ -46,7 +45,15 @@ class CreateCommandOperationRequest:
             operation_instance_mismatch: outcome unknown. Memory and OS process creation are not a transaction. No cross-
             execd-restart reconciliation, exactly-once completion, or business-side-effect guarantee. Never regenerate any
             identity component during retry. Use an opaque random token, never a secret or business payload.
-        cwd (str | Unset): Working directory for command execution Example: /workspace.
+        command (str | Unset): Shell command to execute. Mutually exclusive with argv. Example: ls -la /workspace.
+        argv (list[str] | Unset): Executable and literal arguments, mutually exclusive with command. argv[0] must be
+            non-empty; NUL is invalid and arguments are not shell-expanded. Relative paths use cwd; bare names search
+            absolute entries in the child PATH. Windows uses standard argument encoding and adds .exe to extensionless
+            names; batch files require a shell.
+             Example: ['python3', '-c', "print('hello')"].
+        cwd (str | Unset): Working directory, defaulting to the daemon directory. Expands $NAME and ${NAME} using the
+            command environment, and leading ~ using the daemon user's home. Undefined variables fail validation.
+             Example: /workspace.
         background (bool | Unset): Whether to run command in detached mode Default: False.
         timeout (int | Unset): Maximum allowed execution time in milliseconds before the command is forcefully
             terminated by the server. If omitted, the server will not enforce any timeout. Example: 60000.
@@ -54,12 +61,14 @@ class CreateCommandOperationRequest:
              Example: 1000.
         gid (int | Unset): Unix group ID used to run the command. Requires `uid` to be provided.
              Example: 1000.
-        envs (RunCommandRequestEnvs | Unset): Environment variables injected into the command process. Example: {'PATH':
-            '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', 'PYTHONUNBUFFERED': '1'}.
+        envs (RunCommandRequestEnvs | Unset): Literal request values overriding EXECD_ENVS and daemon variables, in that
+            order. Names are case-insensitive on Windows.
+             Example: {'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', 'PYTHONUNBUFFERED': '1'}.
     """
 
-    command: str
     operation_id: str
+    command: str | Unset = UNSET
+    argv: list[str] | Unset = UNSET
     cwd: str | Unset = UNSET
     background: bool | Unset = False
     timeout: int | Unset = UNSET
@@ -69,9 +78,13 @@ class CreateCommandOperationRequest:
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        operation_id = self.operation_id
+
         command = self.command
 
-        operation_id = self.operation_id
+        argv: list[str] | Unset = UNSET
+        if not isinstance(self.argv, Unset):
+            argv = self.argv
 
         cwd = self.cwd
 
@@ -91,10 +104,13 @@ class CreateCommandOperationRequest:
         field_dict.update(self.additional_properties)
         field_dict.update(
             {
-                "command": command,
                 "operation_id": operation_id,
             }
         )
+        if command is not UNSET:
+            field_dict["command"] = command
+        if argv is not UNSET:
+            field_dict["argv"] = argv
         if cwd is not UNSET:
             field_dict["cwd"] = cwd
         if background is not UNSET:
@@ -115,9 +131,11 @@ class CreateCommandOperationRequest:
         from ..models.run_command_request_envs import RunCommandRequestEnvs
 
         d = dict(src_dict)
-        command = d.pop("command")
-
         operation_id = d.pop("operation_id")
+
+        command = d.pop("command", UNSET)
+
+        argv = cast(list[str], d.pop("argv", UNSET))
 
         cwd = d.pop("cwd", UNSET)
 
@@ -137,8 +155,9 @@ class CreateCommandOperationRequest:
             envs = RunCommandRequestEnvs.from_dict(_envs)
 
         create_command_operation_request = cls(
-            command=command,
             operation_id=operation_id,
+            command=command,
+            argv=argv,
             cwd=cwd,
             background=background,
             timeout=timeout,

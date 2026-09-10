@@ -22,6 +22,7 @@ using OpenSandbox.Adapters;
 using OpenSandbox.Core;
 using OpenSandbox.Internal;
 using OpenSandbox.Models;
+using OpenSandbox.Services;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
@@ -153,6 +154,54 @@ public class CommandsAdapterTests
         (await adapter.GetExecutionOperationAsync("command", "scope.123.persisted")).Id.Should().Be(operation.Id);
         (await adapter.CreatePtyOperationAsync("scope.123.persisted", "/tmp", "echo hello")).Id.Should().Be(operation.Id);
         calls.Should().Be(4);
+    }
+
+    [Fact]
+    public async Task NativeArgv_ShouldRejectInvalidInputsBeforeSending()
+    {
+        var requests = 0;
+        var handler = new StubHttpMessageHandler((_, _) =>
+        {
+            requests++;
+            throw new InvalidOperationException("Unexpected request");
+        });
+        IExecdCommands commands = CreateAdapter(handler);
+        IReadOnlyList<string>[] invalid = [null!, [], [""], ["tool", null!], ["tool", "\0"]];
+        foreach (var argv in invalid)
+        {
+            await Assert.ThrowsAsync<InvalidArgumentException>(() => commands.RunAsync(argv));
+            Assert.Throws<InvalidArgumentException>(() => commands.RunStreamAsync(argv));
+        }
+        requests.Should().Be(0);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RunArgv_ShouldPreserveArgumentsAndOptions(bool streaming)
+    {
+        string[] argv = ["tool", "", "a b", "$HOME", "x'y", "中文"];
+        var handler = new StubHttpMessageHandler(async (request, cancellationToken) =>
+        {
+            using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync());
+            body.RootElement.TryGetProperty("command", out _).Should().BeFalse();
+            body.RootElement.GetProperty("argv").EnumerateArray().Select(x => x.GetString()).Should().Equal(argv);
+            body.RootElement.GetProperty("cwd").GetString().Should().Be("$DIR");
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("data: {\"type\":\"execution_complete\"}\n\n", Encoding.UTF8, "text/event-stream")
+            };
+        });
+        IExecdCommands commands = CreateAdapter(handler);
+        var options = new RunCommandOptions { WorkingDirectory = "$DIR" };
+        if (streaming)
+        {
+            await foreach (var _ in commands.RunStreamAsync(argv, options)) { }
+        }
+        else
+        {
+            await commands.RunAsync(argv, options);
+        }
     }
 
     [Fact]

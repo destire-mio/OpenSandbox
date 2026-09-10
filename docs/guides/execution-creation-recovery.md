@@ -117,7 +117,7 @@ trace IDs do not establish a separate tenant. With authentication disabled, all
 requests share the anonymous boundary. Tokens are hashed before indexing records.
 Another controller, including another sandbox, rejects the instance component.
 
-Commands compare command text (including shell arguments), cwd, background mode,
+Commands compare command text or the ordered native `argv` array, cwd, background mode,
 timeout, UID, GID and environment overrides. PTYs compare command and cwd. Fields
 are normalized through typed JSON; map order and absent/empty env maps are equal.
 Strings are compared literally, without shell parsing or whitespace rewriting.
@@ -131,8 +131,18 @@ fingerprint or caller identity. Authentication failures on the four operation
 endpoints return HTTP 401 with `code: UNAUTHORIZED` and `message`; legacy endpoint
 authentication errors keep their existing shape. The 1 MiB body limit is applied
 to the input stream before JSON decoding, including trailing data. Operation
-lookups are private, not an inventory, and use `Cache-Control: no-store`, including authentication errors. For keyed commands,
-known-ID status omits command content and uses a generic runtime error description.
+lookups are private, not an inventory, and use `Cache-Control: no-store`, including
+authentication errors. The existing authenticated `GET /command/status/{id}`
+returns command content and the runtime error for both keyed and unkeyed commands.
+Those diagnostics can include command arguments and filesystem paths; callers
+sharing execd's access token share access to them.
+
+Recovering a command handle does not recover foreground stdout/stderr: foreground
+output files are removed when execution finishes. The status error describes a
+launch or wait failure (for example, a missing executable or `exit status 7`), not
+the program's stderr. Select background mode before creation and use the existing
+log cursor when retained output is required. A failed keyed command also retains
+its status and launch error under the reserved handle.
 
 ## Failure and recovery contract
 
@@ -199,6 +209,22 @@ replay and `takeover=1` apply. A keyed session permits one launch attempt. After
 process exit, reconnect replays the retained output and terminal event rather than
 starting another shell. A failed launch is not retried by reconnecting. Unkeyed
 sessions preserve their previous behavior.
+
+`GET /pty/{id}` returns `launch_attempted` and `launch_failed` alongside `running`:
+
+| Launch attempted | Launch failed | Running | Meaning |
+| --- | --- | --- | --- |
+| false | false | false | Dormant session; no launch attempt. |
+| true | true | false | The launch attempt failed; a keyed session cannot launch again. |
+| true | false | true | The process started and is running. |
+| true | false | false | The process started and then exited; replay/terminal reconnect applies. |
+
+A nonzero process exit is not a launch failure. For unkeyed sessions, the flags
+describe the latest launch attempt, including any legacy restart. Older servers
+omit these fields; absence means the launch outcome is unavailable, not false.
+The PTY operation stays `created` after a WebSocket launch failure because the
+session was created; its launch outcome belongs to the session status. This lets
+a caller recover the outcome even if the `start_failed` WebSocket frame was lost.
 
 The keyed `POST /pty/operations` claims its record before scheduling directory
 and session creation in the background. A `202 creating` response may precede

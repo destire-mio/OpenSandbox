@@ -71,6 +71,30 @@ def transport_handler(request):
     )
 
 
+@pytest.mark.parametrize("launch", [None, (False, False), (True, True), (True, False)])
+def test_pty_status_client_distinguishes_missing_launch_outcome(launch):
+    from opensandbox.api.execd.api.command import get_pty_session_status
+    from opensandbox.api.execd.client import Client
+    from opensandbox.api.execd.types import UNSET
+
+    payload = {"session_id": "recovered", "running": False, "output_offset": 0}
+    if launch is not None:
+        payload.update(launch_attempted=launch[0], launch_failed=launch[1])
+    with httpx.Client(
+        base_url="http://execd",
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload)),
+    ) as http_client:
+        client = Client(base_url="http://execd").set_httpx_client(http_client)
+        result = get_pty_session_status.sync("recovered", client=client)
+    assert result is not None
+    if launch is None:
+        assert result.launch_attempted is UNSET
+        assert result.launch_failed is UNSET
+    else:
+        assert result.launch_attempted is launch[0]
+        assert result.launch_failed is launch[1]
+
+
 @pytest.mark.asyncio
 async def test_async_execution_operations():
     adapter = CommandsAdapter(

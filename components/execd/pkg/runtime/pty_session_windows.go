@@ -74,6 +74,11 @@ func (c *Controller) GetPTYSessionStatus(id string) (bool, int64, error) { //nol
 	return false, 0, errPTYSessionNotSupported
 }
 
+// GetPTYSessionState is not supported on Windows.
+func (c *Controller) GetPTYSessionState(_ string) (PTYSessionState, error) {
+	return PTYSessionState{}, errPTYSessionNotSupported
+}
+
 // Method stubs so the controller layer can call them without build-tag guards.
 
 func (s *ptySession) LockWS() bool                                 { return false }

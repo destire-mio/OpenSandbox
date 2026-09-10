@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"github.com/alibaba/opensandbox/execd/pkg/web/controller"
+	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 	"github.com/stretchr/testify/require"
 )
 
@@ -142,7 +143,7 @@ func TestOperationHTTP(t *testing.T) {
 			kernel, err := ctrl.GetCommandStatus(original.ID)
 			require.NoError(t, err)
 			require.True(t, kernel.Running)
-			require.Empty(t, kernel.Content)
+			require.Equal(t, body["command"], kernel.Content)
 			b, err := os.ReadFile(marker)
 			require.NoError(t, err)
 			require.Len(t, strings.Fields(string(b)), 1)
@@ -292,7 +293,7 @@ func TestOperationPTYHTTP(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "starts")
 	gate := filepath.Join(t.TempDir(), "release")
 	key := operationIdentity(t, server.URL, "pty-recovery")
-	body := map[string]any{"operation_id": key, "command": "echo $$ >> '" + marker + "'; echo replay-marker; while [ ! -f '" + gate + "' ]; do sleep 0.01; done"}
+	body := map[string]any{"operation_id": key, "command": "echo $$ >> '" + marker + "'; echo replay-marker; while [ ! -f '" + gate + "' ]; do sleep 0.01; done; exit 7"}
 	status, lost := loseOperationResponse(t, server.URL, "/pty/operations", body, nil)
 	original := decodeOperation(t, status, lost)
 	defer ctrl.DeletePTYSession(original.ID)
@@ -304,6 +305,10 @@ func TestOperationPTYHTTP(t *testing.T) {
 		status, data := getOperationHTTP(t, server.URL, "/execution/operation?kind=pty", key, "test-token")
 		return decodeOperation(t, status, data).State == "created"
 	}, 5*time.Second, time.Millisecond)
+	var state model.PTYSessionStatusResponse
+	getExecutionStatusHTTP(t, server.URL, "/pty/"+original.ID, &state)
+	require.False(t, state.LaunchAttempted)
+	require.False(t, state.LaunchFailed)
 	dial := func(query string) *websocket.Conn {
 		conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/pty/"+original.ID+"/ws"+query, http.Header{"X-EXECD-ACCESS-TOKEN": []string{"test-token"}})
 		require.NoError(t, err)
@@ -324,6 +329,10 @@ func TestOperationPTYHTTP(t *testing.T) {
 		}
 	}
 	readUntil(first, "replay-marker")
+	getExecutionStatusHTTP(t, server.URL, "/pty/"+original.ID, &state)
+	require.True(t, state.Running)
+	require.True(t, state.LaunchAttempted)
+	require.False(t, state.LaunchFailed)
 	second := dial("?takeover=1&since=0")
 	readUntil(second, "replay-marker")
 	b, err := os.ReadFile(marker)
@@ -334,6 +343,11 @@ func TestOperationPTYHTTP(t *testing.T) {
 	second.Close()
 	third := dial("?takeover=1&since=0")
 	readUntil(third, "replay-marker")
+	getExecutionStatusHTTP(t, server.URL, "/pty/"+original.ID, &state)
+	require.False(t, state.Running)
+	require.True(t, state.LaunchAttempted)
+	require.False(t, state.LaunchFailed, "nonzero exit and rejected relaunch are not startup failures")
+	require.Equal(t, 7, ctrl.GetPTYSession(original.ID).ExitCode())
 	status, data = postOperation(t, server.URL, "/pty/operations", body)
 	require.Equal(t, original.ID, decodeOperation(t, status, data).ID)
 	b, err = os.ReadFile(marker)

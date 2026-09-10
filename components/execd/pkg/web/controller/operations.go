@@ -69,6 +69,20 @@ func (c *basicController) decodeCreation(target any, callerBound bool) error {
 		}
 		decoder.DisallowUnknownFields()
 	}
+	if request, ok := target.(*model.RunCommandRequest); ok {
+		// UnmarshalJSON handles command/argv presence but bypasses the outer
+		// decoder's unknown-field check. Check a method-free alias first,
+		// keeping strict decoding confined to operation creation.
+		type commandFields model.RunCommandRequest
+		var checked commandFields
+		if err = decoder.Decode(&checked); err != nil {
+			return errors.New("invalid creation fields")
+		}
+		if err = json.Unmarshal(raw, request); err != nil {
+			return errors.New("invalid creation fields")
+		}
+		return nil
+	}
 	if err = decoder.Decode(target); err != nil {
 		return errors.New("invalid creation fields")
 	}

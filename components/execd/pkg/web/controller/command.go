@@ -211,6 +211,7 @@ func (c *CodeInterpretingController) buildExecuteCommandRequest(request model.Ru
 		return &runtime.ExecuteCodeRequest{
 			Language: runtime.BackgroundCommand,
 			Code:     request.Command,
+			Argv:     request.Argv,
 			Cwd:      request.Cwd,
 			Timeout:  timeout,
 			Gid:      request.Gid,
@@ -221,6 +222,7 @@ func (c *CodeInterpretingController) buildExecuteCommandRequest(request model.Ru
 		return &runtime.ExecuteCodeRequest{
 			Language: runtime.Command,
 			Code:     request.Command,
+			Argv:     request.Argv,
 			Cwd:      request.Cwd,
 			Timeout:  timeout,
 			Gid:      request.Gid,

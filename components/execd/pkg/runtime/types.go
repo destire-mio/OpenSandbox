@@ -38,6 +38,7 @@ type ExecuteCodeRequest struct {
 	commandID string            // reserved by the controller before idempotent creation
 	Language  Language          `json:"language"`
 	Code      string            `json:"code"`
+	Argv      []string          `json:"argv,omitempty"`
 	Context   string            `json:"context"`
 	Timeout   time.Duration     `json:"timeout"`
 	Cwd       string            `json:"cwd"`
@@ -45,6 +46,14 @@ type ExecuteCodeRequest struct {
 	Uid       *uint32           `json:"uid,omitempty"`
 	Gid       *uint32           `json:"gid,omitempty"`
 	Hooks     ExecuteResultHook
+}
+
+// PTYSessionState describes process startup separately from session creation.
+type PTYSessionState struct {
+	Running         bool
+	OutputOffset    int64
+	LaunchAttempted bool
+	LaunchFailed    bool
 }
 
 // SetDefaultHooks installs stdout logging fallbacks for unset hooks.

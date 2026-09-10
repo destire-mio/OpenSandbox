@@ -110,7 +110,7 @@ func (c *PTYController) GetPTYSessionStatus() {
 		return
 	}
 
-	running, offset, err := codeRunner.GetPTYSessionStatus(id)
+	state, err := codeRunner.GetPTYSessionState(id)
 	if err != nil {
 		if errors.Is(err, runtime.ErrContextNotFound) {
 			c.RespondError(
@@ -129,9 +129,11 @@ func (c *PTYController) GetPTYSessionStatus() {
 	}
 
 	c.RespondSuccess(model.PTYSessionStatusResponse{
-		SessionID:    id,
-		Running:      running,
-		OutputOffset: offset,
+		SessionID:       id,
+		Running:         state.Running,
+		OutputOffset:    state.OutputOffset,
+		LaunchAttempted: state.LaunchAttempted,
+		LaunchFailed:    state.LaunchFailed,
 	})
 }
 

@@ -28,7 +28,9 @@ type CreatePTYSessionResponse struct {
 
 // PTYSessionStatusResponse is the response for GET /pty/:sessionId.
 type PTYSessionStatusResponse struct {
-	SessionID    string `json:"session_id"`
-	Running      bool   `json:"running"`
-	OutputOffset int64  `json:"output_offset"`
+	SessionID       string `json:"session_id"`
+	Running         bool   `json:"running"`
+	OutputOffset    int64  `json:"output_offset"`
+	LaunchAttempted bool   `json:"launch_attempted"`
+	LaunchFailed    bool   `json:"launch_failed"`
 }

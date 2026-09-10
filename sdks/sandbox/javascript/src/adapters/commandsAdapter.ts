@@ -53,13 +53,13 @@ interface StreamingExecutionSpec<TBody> {
   fallbackErrorMessage: string;
 }
 
-function toRunCommandRequest(command: string, opts?: RunCommandOpts): ApiRunCommandRequest {
+function toRunCommandRequest(command: string | string[], opts?: RunCommandOpts): ApiRunCommandRequest {
   if (opts?.gid != null && opts.uid == null) {
     throw new Error("uid is required when gid is provided");
   }
 
   const body: ApiRunCommandRequest = {
-    command,
+    ...(typeof command === "string" ? { command } : { argv: command }),
     cwd: opts?.workingDirectory,
     background: !!opts?.background,
   };
@@ -212,10 +212,21 @@ export class CommandsAdapter implements ExecdCommands, ExecutionOperations {
   }
 
   private buildRunStreamSpec(
-    command: string,
+    command: string | string[],
     opts?: RunCommandOpts,
   ): StreamingExecutionSpec<ApiRunCommandRequest> {
-    assertNonBlank(command, "command");
+    if (typeof command === "string") {
+      assertNonBlank(command, "command");
+    } else {
+      if (!Array.isArray(command) || !command.length || !command[0]) {
+        throw new Error("argv requires a non-empty executable and strings without NUL");
+      }
+      for (const arg of command) {
+        if (typeof arg !== "string" || arg.includes("\0")) {
+          throw new Error("argv requires a non-empty executable and strings without NUL");
+        }
+      }
+    }
     return {
       pathname: "/command",
       body: toRunCommandRequest(command, opts),
@@ -344,7 +355,7 @@ export class CommandsAdapter implements ExecdCommands, ExecutionOperations {
   }
 
   async *runStream(
-    command: string,
+    command: string | string[],
     opts?: RunCommandOpts,
     signal?: AbortSignal,
   ): AsyncIterable<ServerStreamEvent> {
@@ -357,7 +368,7 @@ export class CommandsAdapter implements ExecdCommands, ExecutionOperations {
   }
 
   async run(
-    command: string,
+    command: string | string[],
     opts?: RunCommandOpts,
     handlers?: ExecutionHandlers,
     signal?: AbortSignal,

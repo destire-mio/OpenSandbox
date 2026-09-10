@@ -21,6 +21,7 @@ import com.alibaba.opensandbox.sandbox.api.execd.CommandApi
 import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ClientError
 import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ClientException
 import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ResponseType
+import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.Serializer
 import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ServerError
 import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ServerException
 import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.Success
@@ -46,6 +47,7 @@ import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.jsonPar
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toCommandTimeoutMillis
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxApiException
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxException
+import kotlinx.serialization.json.Json
 import okhttp3.Headers.Companion.toHeaders
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
@@ -73,6 +75,7 @@ internal class CommandsAdapter(
         private const val SESSION_PATH_SEGMENT = "session"
     }
 
+    private val commandJson = Json(jsonParser) { explicitNulls = false }
     private val logger = LoggerFactory.getLogger(CommandsAdapter::class.java)
     private val instanceLock = Any()
     private var cachedInstance: ExecutionInstance? = null
@@ -173,18 +176,33 @@ internal class CommandsAdapter(
         if (operationId.isBlank()) throw InvalidArgumentException("operationId is required")
         try {
             val original = request.toApiRunCommandRequest()
-            return commandApi.createCommandOperation(
+            val body =
                 CreateCommandOperationRequest(
                     operationId = operationId,
                     command = original.command,
+                    argv = original.argv,
                     cwd = original.cwd,
                     background = original.background,
                     timeout = original.timeout,
                     uid = original.uid,
                     gid = original.gid,
                     envs = original.envs,
-                ),
-            ).toOperation()
+                )
+            // As with /command, omit the unused command/argv alternative.
+            // The generated client's default serializer emits explicit nulls.
+            val httpRequest =
+                Request.Builder()
+                    .url("$execdBaseUrl$RUN_COMMAND_PATH/operations")
+                    .post(commandJson.encodeToString(body).toRequestBody("application/json".toMediaType()))
+                    .build()
+            return execdApiClient.newCall(httpRequest).execute().use { response ->
+                if (!response.isSuccessful) {
+                    throw response.toSandboxApiException { status, _ -> "Failed to create command operation. Status code: $status" }
+                }
+                Serializer.kotlinxSerializationJson.decodeFromString<ApiExecutionOperation>(
+                    response.body?.string() ?: throw IllegalStateException("Missing execution operation"),
+                ).toOperation()
+            }
         } catch (e: Exception) {
             throw operationException(e)
         }
@@ -206,7 +224,7 @@ internal class CommandsAdapter(
     }
 
     override fun run(request: RunCommandRequest): Execution {
-        if (request.command.isEmpty()) {
+        if (request.argv == null && request.command.isEmpty()) {
             throw InvalidArgumentException("Command cannot be empty")
         }
         try {
@@ -214,7 +232,7 @@ internal class CommandsAdapter(
                 Request.Builder()
                     .url("$execdBaseUrl$RUN_COMMAND_PATH")
                     .post(
-                        jsonParser.encodeToString(request.toApiRunCommandRequest()).toRequestBody("application/json".toMediaType()),
+                        commandJson.encodeToString(request.toApiRunCommandRequest()).toRequestBody("application/json".toMediaType()),
                     )
                     .headers(execdEndpoint.headers.toHeaders())
                     .build()

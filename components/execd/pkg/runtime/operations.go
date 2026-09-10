@@ -332,6 +332,9 @@ func (c *Controller) CreateCommandOperation(principal, identity string, request 
 	// Own the inputs used by both fingerprinting and asynchronous startup.
 	snapshot := *request
 	snapshot.Envs = maps.Clone(request.Envs)
+	if request.Argv != nil {
+		snapshot.Argv = append([]string{}, request.Argv...)
+	}
 	if request.Uid != nil {
 		uid := *request.Uid
 		snapshot.Uid = &uid
@@ -349,12 +352,13 @@ func (c *Controller) CreateCommandOperation(principal, identity string, request 
 	payload := struct {
 		Language Language          `json:"language"`
 		Code     string            `json:"code"`
+		Argv     []string          `json:"argv"`
 		Cwd      string            `json:"cwd"`
 		Timeout  time.Duration     `json:"timeout"`
 		Envs     map[string]string `json:"envs,omitempty"`
 		Uid      *uint32           `json:"uid,omitempty"`
 		Gid      *uint32           `json:"gid,omitempty"`
-	}{request.Language, request.Code, request.Cwd, request.Timeout, request.Envs, request.Uid, request.Gid}
+	}{request.Language, request.Code, request.Argv, request.Cwd, request.Timeout, request.Envs, request.Uid, request.Gid}
 	entry, owner, err := c.claimOperation(principal, "command", identity, payload)
 	if err != nil {
 		return Operation{}, err
@@ -362,6 +366,7 @@ func (c *Controller) CreateCommandOperation(principal, identity string, request 
 	if owner {
 		req := *request
 		req.commandID = entry.operation.ID
+		var launchError string
 		req.Hooks = ExecuteResultHook{
 			OnExecuteInit: func(string) {
 				if kernel := c.commandSnapshot(req.commandID); kernel != nil {
@@ -370,13 +375,31 @@ func (c *Controller) CreateCommandOperation(principal, identity string, request 
 			},
 			OnExecuteResult: func(map[string]any, int) {}, OnExecuteStatus: func(string) {},
 			OnExecuteStdout: func(string) {}, OnExecuteStderr: func(string) {},
-			OnExecuteError: func(*execute.ErrorOutput) {}, OnExecuteComplete: func(time.Duration) {},
+			OnExecuteError:    func(output *execute.ErrorOutput) { launchError = output.EValue },
+			OnExecuteComplete: func(time.Duration) {},
 		}
 		safego.Go(func() {
 			// A panic leaves creation unresolved, not permission to start again.
+			startedAt := time.Now()
 			err := c.Execute(&req)
 			kernel := c.commandSnapshot(req.commandID)
-			c.finishCreation(entry, err != nil || kernel == nil || kernel.pid < 0)
+			failed := err != nil || kernel == nil || kernel.pid < 0
+			if kernel == nil {
+				// Foreground launch errors arrive through the synchronous hook;
+				// preparation errors return from Execute. Preserve either in the
+				// existing status store before publishing failed creation.
+				if err != nil {
+					launchError = err.Error()
+				}
+				finishedAt, exitCode := time.Now(), 255
+				c.storeCommandKernel(req.commandID, &commandKernel{
+					callerBound: true, content: req.commandContent(),
+					startedAt: startedAt, finishedAt: &finishedAt,
+					exitCode: &exitCode, errMsg: launchError,
+					isBackground: req.Language == BackgroundCommand,
+				})
+			}
+			c.finishCreation(entry, failed)
 		})
 	}
 	return c.operationSnapshot(entry), nil
@@ -408,7 +431,7 @@ func (c *Controller) commandSessionID(request *ExecuteCodeRequest) string {
 
 func (request *ExecuteCodeRequest) logCommandReceived() {
 	if request.commandID == "" {
-		log.Info("received command: %v", log.SanitizeCommand(request.Code))
+		log.Info("received command: %v", log.SanitizeCommand(request.commandContent()))
 	}
 }
 func (request *ExecuteCodeRequest) logCommandError(stage string, err error) {

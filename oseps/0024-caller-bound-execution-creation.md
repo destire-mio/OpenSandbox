@@ -51,7 +51,7 @@ A request may disappear after claim but before startup. The runtime owns creatio
 
 A dormant PTY can race expiry and first connection. Its session lock serializes expiry with `StartPTY`/`StartPipe`. A caller-bound PTY permits one launch attempt; a terminal reconnect uses existing replay/terminal behavior. Unkeyed behavior is preserved.
 
-Sensitive command/env data is used only to compute an internal SHA-256 request fingerprint. New errors, creation lookup and keyed command status do not expose raw input. No identity enumeration route is added. Authentication runs before create/lookup, and recovery responses are not cacheable.
+Creation lookup and operation errors do not expose raw inputs or the internal SHA-256 request fingerprint. Existing authenticated command status preserves command content and runtime diagnostics for keyed and unkeyed commands; callers sharing the execd token share that trust boundary. No identity enumeration route is added. Authentication runs before create/lookup, and recovery responses are not cacheable.
 
 ## Design Details
 
@@ -63,11 +63,13 @@ Retention is 24 hours from the encoded server timestamp, extended while creating
 
 Both keyed creation paths schedule runtime-owned background creation after claiming. PTY directory creation may wait on the filesystem, so callers can receive `202 creating` before the dormant session exists. They wait for `created` before attaching.
 
+PTY status exposes `launch_attempted` and `launch_failed` from the session lifecycle, distinguishing a dormant session, a failed first launch, and a process that started and exited. Operation state remains `created` once the session exists; a lost WebSocket launch-error frame does not hide the launch outcome. Failed keyed commands retain the runtime error under the reserved command handle. Foreground output is not retained after execution; background mode provides the existing log cursor.
+
 The five standard SDKs cache instance discovery for at most 60 monotonic seconds from fetch start and share concurrent fetches. Each caller receives an independent snapshot. New logical operations go through the instance getter; recovery loads the saved ID. Expiry and instance mismatch invalidate the cache for future operations while returning the original error, without resending creation. Cached server time reduces the remaining recovery window and is never a permanent ID source.
 
 The existing OpenTelemetry module exports bounded request outcomes, occupancy by kind/state, configured capacity and the oldest unresolved creation's age. No caller identity, operation ID, handle or request content becomes a metric label.
 
-Fingerprint inputs are command text, cwd, background, timeout, uid, gid and environment map; PTY uses command/cwd. Canonical typed JSON sorts map keys and normalizes absent/empty env maps. Do not trim command strings or infer shell equivalence. Unknown keyed request fields are rejected. Daemon environment is resolved at the winning launch; PTY/pipe mode follows the first WebSocket launch and is not a POST parameter.
+Fingerprint inputs are command text or the ordered native argv array, cwd, background, timeout, uid, gid and environment map; PTY uses command/cwd. Canonical typed JSON sorts map keys and normalizes absent/empty env maps. Do not trim command strings or infer shell equivalence. Unknown keyed request fields are rejected. Daemon environment is resolved at the winning launch; PTY/pipe mode follows the first WebSocket launch and is not a POST parameter.
 
 ## Test Plan
 

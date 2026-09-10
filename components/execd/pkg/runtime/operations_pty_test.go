@@ -216,3 +216,34 @@ func TestOperationPTYRetention(t *testing.T) {
 	requireOperationError(t, err, "operation_expired")
 	require.Nil(t, c.GetPTYSession(active.ID))
 }
+
+func TestOperationPTYStatusPreservesLegacyRestartOutcome(t *testing.T) {
+	c := NewController("", "")
+	cwd := t.TempDir()
+	id := NewPTYSessionID()
+	session, err := c.CreatePTYSession(id, cwd, "exit 7")
+	require.NoError(t, err)
+	defer c.DeletePTYSession(id)
+	require.True(t, session.LockWS())
+	defer session.UnlockWS()
+	require.NoError(t, session.StartPipe())
+	select {
+	case <-session.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("process did not exit")
+	}
+	state, err := c.GetPTYSessionState(id)
+	require.NoError(t, err)
+	require.True(t, state.LaunchAttempted)
+	require.False(t, state.LaunchFailed)
+	require.NoError(t, os.Remove(cwd))
+	require.Error(t, session.StartPTY())
+	state, err = c.GetPTYSessionState(id)
+	require.NoError(t, err)
+	require.True(t, state.LaunchFailed, "a prior successful launch must not mask a failed legacy restart")
+	require.NoError(t, os.Mkdir(cwd, 0700))
+	require.NoError(t, session.StartPipe())
+	state, err = c.GetPTYSessionState(id)
+	require.NoError(t, err)
+	require.False(t, state.LaunchFailed)
+}

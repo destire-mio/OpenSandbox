@@ -348,8 +348,8 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Execute shell command
-         * @description Executes a shell command and streams the output in real-time using SSE (Server-Sent Events).
+         * Execute shell command or native argv
+         * @description Executes shell text (`command`) or native arguments (`argv`) and streams output using SSE; supply exactly one input mode.
          *     The command can run in foreground or background mode. The response includes stdout, stderr,
          *     execution status, and completion events.
          *     Optionally specify `timeout` (milliseconds) to enforce a maximum runtime; the server will
@@ -1114,6 +1114,10 @@ export interface components {
             running: boolean;
             /** Format: int64 */
             output_offset: number;
+            /** @description Whether a process launch was attempted. False means a dormant session. Omitted by older servers; absence does not mean false. */
+            launch_attempted?: boolean;
+            /** @description Whether the latest accepted launch attempt failed before starting a process. A nonzero process exit is not a launch failure. Caller-bound sessions cannot reattempt launch; their operation remains created because the session exists. Omitted by older servers. */
+            launch_failed?: boolean;
         };
         /** @description Request to create a bash session (optional body; empty treated as defaults) */
         CreateSessionRequest: {
@@ -1182,15 +1186,24 @@ export interface components {
              */
             code: string;
         };
-        /** @description Request to execute a shell command */
+        /** @description Execute exactly one of command (shell text) or argv (native arguments). */
         RunCommandRequest: {
             /**
-             * @description Shell command to execute
+             * @description Shell command to execute. Mutually exclusive with argv.
              * @example ls -la /workspace
              */
-            command: string;
+            command?: string;
             /**
-             * @description Working directory for command execution
+             * @description Executable and literal arguments, mutually exclusive with command. argv[0] must be non-empty; NUL is invalid and arguments are not shell-expanded. Relative paths use cwd; bare names search absolute entries in the child PATH. Windows uses standard argument encoding and adds .exe to extensionless names; batch files require a shell.
+             * @example [
+             *       "python3",
+             *       "-c",
+             *       "print('hello')"
+             *     ]
+             */
+            argv?: string[];
+            /**
+             * @description Working directory, defaulting to the daemon directory. Expands $NAME and ${NAME} using the command environment, and leading ~ using the daemon user's home. Undefined variables fail validation.
              * @example /workspace
              */
             cwd?: string;
@@ -1219,7 +1232,7 @@ export interface components {
              */
             gid?: number;
             /**
-             * @description Environment variables injected into the command process.
+             * @description Literal request values overriding EXECD_ENVS and daemon variables, in that order. Names are case-insensitive on Windows.
              * @example {
              *       "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
              *       "PYTHONUNBUFFERED": "1"
@@ -1228,7 +1241,7 @@ export interface components {
             envs?: {
                 [key: string]: string;
             };
-        };
+        } & (unknown | unknown);
         /** @description Command execution status (foreground or background) */
         CommandStatusResponse: {
             /**

@@ -76,6 +76,7 @@ func NewPTYSessionID() string {
 type ptySession struct {
 	callerBound    bool // immutable before publication
 	startAttempted bool // guarded by mu, including a failed launch
+	launchFailed   bool // guarded by mu; outcome of the latest accepted launch attempt
 	id             string
 	cwd            string
 	command        string // optional custom command interpreted by the selected shell
@@ -252,7 +253,7 @@ func buildPTYCommand(command string) *exec.Cmd {
 
 // StartPTY launches the preferred shell via pty.StartWithSize.
 // Must be called with the WS lock held.
-func (s *ptySession) StartPTY() error {
+func (s *ptySession) StartPTY() (err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -267,6 +268,7 @@ func (s *ptySession) StartPTY() error {
 	}
 
 	s.startAttempted = true
+	defer func() { s.launchFailed = err != nil }()
 	cmd := buildPTYCommand(s.command)
 	cmd.Env = os.Environ()
 	if s.cwd != "" {
@@ -305,7 +307,7 @@ func (s *ptySession) StartPTY() error {
 
 // StartPipe launches the preferred shell with plain stdin/stdout/stderr os.Pipes.
 // Must be called with the WS lock held.
-func (s *ptySession) StartPipe() error {
+func (s *ptySession) StartPipe() (err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -320,6 +322,7 @@ func (s *ptySession) StartPipe() error {
 	}
 
 	s.startAttempted = true
+	defer func() { s.launchFailed = err != nil }()
 	stdinR, stdinW, err := os.Pipe()
 	if err != nil {
 		return fmt.Errorf("stdin pipe: %w", err)
@@ -731,11 +734,23 @@ func (c *Controller) DeletePTYSession(id string) error {
 
 // GetPTYSessionStatus returns status information for a PTY session.
 func (c *Controller) GetPTYSessionStatus(id string) (running bool, outputOffset int64, err error) {
+	state, err := c.GetPTYSessionState(id)
+	return state.Running, state.OutputOffset, err
+}
+
+// GetPTYSessionState snapshots launch outcome and execution status under the
+// session mutex. Rejected reconnects do not change the accepted launch outcome.
+func (c *Controller) GetPTYSessionState(id string) (PTYSessionState, error) {
 	s := c.getPTYSession(id)
 	if s == nil {
-		return false, 0, ErrContextNotFound
+		return PTYSessionState{}, ErrContextNotFound
 	}
-	return s.IsRunning(), s.replay.Total(), nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return PTYSessionState{
+		Running: s.pid != 0, OutputOffset: s.replay.Total(),
+		LaunchAttempted: s.startAttempted, LaunchFailed: s.launchFailed,
+	}, nil
 }
 
 // expireOperationPTY excludes launch under the same mutex as StartPTY/StartPipe.

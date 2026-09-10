@@ -58,3 +58,25 @@ func TestCreationBodyReadLimit(t *testing.T) {
 		})
 	}
 }
+
+func TestOperationCommandDecoderRejectsAmbiguousInputs(t *testing.T) {
+	for _, fields := range []string{
+		`"command":"true","unknown":"secret"`,
+		`"argv":["true"],"unknown":"secret"`,
+		`"command":"true","argv":["false"]`,
+		`"command":null`, `"argv":null`, `"argv":["true",null]`,
+	} {
+		t.Run(fields, func(t *testing.T) {
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest("POST", "/command/operations", strings.NewReader(`{"operation_id":"operation",`+fields+`}`))
+			var request model.RunCommandRequest
+			err := newBasicController(ctx).decodeCreation(&request, true)
+			require.Error(t, err)
+			require.NotContains(t, err.Error(), "secret")
+		})
+	}
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest("POST", "/command", strings.NewReader(`{"operation_id":"ignored","command":"true","unknown":"legacy"}`))
+	var legacy model.RunCommandRequest
+	require.NoError(t, newBasicController(ctx).decodeCreation(&legacy, false), "legacy decoding must keep accepting unknown fields")
+}
