@@ -64,9 +64,11 @@ type Proxy struct {
 
 	// queryPolicySelector, when set, resolves the per-query policy (and
 	// per-query resolved-IP callback) from the client's source address. This
-	// is the fleet-profile dispatch seam: one shared listener, N
-	// subject policies. nil keeps the single-policy behavior unchanged.
-	queryPolicySelector func(remoteAddr netip.Addr) *QueryPolicy
+	// is the fast-sandbox-profile dispatch seam: one shared listener, N
+	// subject policies. nil keeps the single-policy behavior unchanged. A nil
+	// result denies the query (fail closed); the returned denyReason carries
+	// the selector's actual reason for the denial log.
+	queryPolicySelector func(remoteAddr netip.Addr) (*QueryPolicy, string)
 
 	// Hosts whose successful outbound DNS log line should be suppressed (audit
 	// errors are still logged). Loaded once at startup; nil means "log all".
@@ -180,11 +182,18 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 	policyToEval := p.currentPolicy()
 	notifyResolved := p.onResolved
 	if sel := p.queryPolicySelector; sel != nil {
-		qp := sel(requestRemoteAddr(w))
+		qp, denyReason := sel(requestRemoteAddr(w))
 		if qp == nil {
-			// Unknown source: fail closed (NXDOMAIN), never fall back to a
-			// default policy that could open the subject.
+			// Fail closed (NXDOMAIN), never fall back to a default policy
+			// that could open the subject. The selector supplies the actual
+			// denial reason; the denial is logged here only, in a single
+			// layer, so the reason stays accurate and is not duplicated.
+			if denyReason == "" {
+				denyReason = "unknown source"
+			}
 			telemetry.RecordDNSDenied()
+			log.Warnf("[dns] denied query (remote=%s question=%q reason=%s)",
+				requestRemoteAddr(w), host, denyReason)
 			resp := new(dns.Msg)
 			resp.SetRcode(r, dns.RcodeNameError)
 			p.writeReply(w, r, resp, telemetry.DNSReplyStageUnknownSource)
@@ -199,6 +208,8 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 	if policyToEval != nil && policyToEval.Evaluate(domain) == policy.ActionDeny {
 		telemetry.RecordDNSDenied()
 		p.publishBlocked(domain)
+		log.Warnf("[dns] denied by policy (remote=%s question=%q)",
+			requestRemoteAddr(w), host)
 		resp := new(dns.Msg)
 		resp.SetRcode(r, dns.RcodeNameError)
 		p.writeReply(w, r, resp, telemetry.DNSReplyStageDeny)
@@ -269,11 +280,12 @@ type QueryPolicy struct {
 	OnResolved func(domain string, ips []nftables.ResolvedIP)
 }
 
-// SetQueryPolicySelector installs the per-query policy dispatch (fleet
+// SetQueryPolicySelector installs the per-query policy dispatch (fast-sandbox
 // profile). Passing nil restores the single-policy behavior; the selector is
 // invoked on the serveDNS goroutine. A nil *QueryPolicy result denies the
-// query (fail closed).
-func (p *Proxy) SetQueryPolicySelector(sel func(remoteAddr netip.Addr) *QueryPolicy) {
+// query (fail closed); the returned denyReason describes why and is included
+// in the denial log (empty falls back to "unknown source").
+func (p *Proxy) SetQueryPolicySelector(sel func(remoteAddr netip.Addr) (*QueryPolicy, string)) {
 	p.queryPolicySelector = sel
 }
 
@@ -315,10 +327,45 @@ func (p *Proxy) maybeNotifyResolved(domain string, resp *dns.Msg) {
 // constant) alongside the error. The reason is what the last attempted upstream failed
 // with: the loop keeps trying, so only the final outcome is reported.
 func (p *Proxy) forward(r *dns.Msg) (*dns.Msg, string, error) {
+	return p.forwardContext(context.Background(), r)
+}
+
+func (p *Proxy) ResolveDomain(ctx context.Context, domain string) ([]nftables.ResolvedIP, error) {
+	var ips []nftables.ResolvedIP
+	var nameError bool
+	for _, queryType := range []uint16{dns.TypeA, dns.TypeAAAA} {
+		query := new(dns.Msg)
+		query.SetQuestion(dns.Fqdn(domain), queryType)
+		response, _, err := p.forwardContext(ctx, query)
+		if err != nil {
+			return nil, err
+		}
+		if response.Truncated {
+			return nil, fmt.Errorf("truncated DNS response for %q", domain)
+		}
+		if response.Rcode == dns.RcodeNameError {
+			nameError = true
+			continue
+		}
+		ips = append(ips, extractResolvedIPs(response)...)
+	}
+	if nameError {
+		if len(ips) > 0 {
+			return nil, fmt.Errorf("inconsistent NXDOMAIN for %q with %d addresses", domain, len(ips))
+		}
+		return nil, nil
+	}
+	return ips, nil
+}
+
+func (p *Proxy) forwardContext(ctx context.Context, r *dns.Msg) (*dns.Msg, string, error) {
 	list := p.forwardUpstreams()
 	var lastErr error
 	lastFailure := telemetry.DNSFailureNoUpstreams
 	for _, upstream := range list {
+		if err := ctx.Err(); err != nil {
+			return nil, telemetry.DNSFailureUpstreamError, err
+		}
 		const upstreamUDPSize = 4096
 		query := r.Copy()
 		if query.IsEdns0() == nil {
@@ -329,7 +376,7 @@ func (p *Proxy) forward(r *dns.Msg) (*dns.Msg, string, error) {
 			Dialer:  p.dialerForUpstream(upstream),
 			UDPSize: upstreamUDPSize,
 		}
-		resp, _, err := c.Exchange(query, upstream)
+		resp, _, err := c.ExchangeContext(ctx, query, upstream)
 		if err != nil {
 			lastErr = err
 			lastFailure = telemetry.DNSFailureUpstreamError

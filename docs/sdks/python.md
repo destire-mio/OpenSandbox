@@ -329,6 +329,13 @@ manual = await Sandbox.create(
 
 ### 2. Custom Health Check
 
+Readiness checks during creation, connection, and resume fail immediately when the
+health endpoint returns HTTP 401 or 403. The SDK raises `SandboxApiException`
+with the original status, error details, and request ID instead of waiting for
+`SandboxReadyTimeoutException`. Check the endpoint credentials or permissions
+before retrying. Transient health failures retain their existing polling behavior;
+`is_healthy()` still returns `False` for a failed built-in health probe.
+
 Define custom logic to determine if the sandbox is healthy. This overrides the default ping check. Synchronous checks must set their own timeouts because the SDK cannot interrupt them; asynchronous checks must not block the event loop or suppress cancellation.
 
 ```python
@@ -577,7 +584,7 @@ The `Sandbox.create()` allows configuring the sandbox environment.
 | `metadata`      | Custom metadata tags                     | Empty                           |
 | `network_policy` | Optional outbound network policy (egress) | -                             |
 | `credential_proxy` | Optional Credential Vault proxy startup settings | -                     |
-| `ready_timeout` | Max time to wait for sandbox to be ready | 30 seconds                      |
+| `ready_timeout` | Total budget for endpoint publication and health checks | 30 seconds                      |
 
 ::: warning
 Metadata keys under `opensandbox.io/` are reserved for system-managed labels and will be rejected by the server.

@@ -237,7 +237,7 @@ override it.
 | `--log-level` | `6` | Log level (0=Emergency, 7=Debug). |
 | `--access-token` | `""` | Optional shared API access token. |
 | `--operation-capacity` | `4096` | Positive limit for retained command/PTY creation records; see [creation recovery](/guides/execution-creation-recovery). |
-| `--graceful-shutdown-timeout` | `1s` | SSE tail-drain wait window before closing. |
+| `--graceful-shutdown-timeout` | `200ms` | SSE tail-drain wait window before closing. |
 | `--jupyter-idle-poll-interval` | `100ms` | Poll interval after Jupyter reports idle. |
 | `--isolation-config` | `""` | Path to the isolation TOML config (see below). |
 | `--init` | `false` | Run as the sandbox init (OSEP-0018): reap children, forward signals, own the container lifecycle. Set together with `EXECD_INIT`; see [Init mode](#init-mode). |

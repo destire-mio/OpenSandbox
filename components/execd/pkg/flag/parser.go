@@ -42,7 +42,7 @@ func InitFlags() {
 	ServerLogLevel = 6
 	ServerAccessToken = ""
 	OperationCapacity = 4096
-	ApiGracefulShutdownTimeout = time.Second * 1
+	ApiGracefulShutdownTimeout = 200 * time.Millisecond
 	JupyterIdlePollInterval = 100 * time.Millisecond
 	IsolationConfigPath = ""
 	InitMode = false
@@ -99,7 +99,7 @@ func InitFlags() {
 		}
 	}
 
-	flag.DurationVar(&ApiGracefulShutdownTimeout, "graceful-shutdown-timeout", ApiGracefulShutdownTimeout, "API graceful shutdown timeout duration (default: 1s)")
+	flag.DurationVar(&ApiGracefulShutdownTimeout, "graceful-shutdown-timeout", ApiGracefulShutdownTimeout, "API graceful shutdown timeout duration (default: 200ms)")
 	flag.DurationVar(&JupyterIdlePollInterval, "jupyter-idle-poll-interval", JupyterIdlePollInterval, "Polling interval after Jupyter idle status before closing stream (default: 100ms)")
 
 	// Isolation config

@@ -19,19 +19,21 @@ It uses the OpenSandbox Python SDK under the hood and is intended to be the shor
 
 ## Install
 
-Choose one:
+::: code-group
 
-```bash
+```bash [pip]
 pip install opensandbox-cli
 ```
 
-```bash
+```bash [uv]
 uv tool install opensandbox-cli
 ```
 
-```bash
+```bash [pipx]
 pipx install opensandbox-cli
 ```
+
+:::
 
 Confirm the install:
 
@@ -213,6 +215,11 @@ osb file info <sandbox-id> /workspace/main.py -o json
 osb file replace <sandbox-id> /workspace/app.py --old old --new new -o json
 osb file chmod <sandbox-id> /workspace/script.sh --mode 755 -o json
 ```
+
+`file download` replaces the local destination only after the entire download
+succeeds. If the download fails or you interrupt it, an existing file stays
+unchanged and temporary download files are removed. The destination directory
+must be writable so the CLI can stage the download before replacing the file.
 
 ### Manage runtime egress policy
 
