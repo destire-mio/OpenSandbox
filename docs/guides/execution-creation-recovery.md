@@ -84,6 +84,16 @@ success or failure. Error mappings preserve the server's conflict/expiry codes.
 In C#, import `OpenSandbox.Services` for the `IExecdCommands` extension methods.
 They use the additive `IExecutionOperations` capability implemented by the standard
 adapter, preserving the existing interface on all supported target frameworks.
+`CreateCommandOperationAsync` accepts either a shell command string or an
+`IReadOnlyList<string>` of native arguments, with the same options and argument
+validation as ordinary command execution. C# instance discovery cancellation
+abandons the caller's wait; the shared fetch continues for other callers.
+
+Python recovery methods translate transport failures into the SDK's
+`SandboxException` types, including connection and timeout exceptions. Kotlin
+exposes `ExecutionOperation.KIND_COMMAND`, `KIND_PTY`, `STATE_CREATING`,
+`STATE_CREATED`, and `STATE_FAILED` for string comparisons without changing the
+public model's field types.
 
 ### Instance caching for new operations
 

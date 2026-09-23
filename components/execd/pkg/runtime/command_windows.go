@@ -34,7 +34,6 @@ import (
 // runCommand executes shell commands and streams their output on Windows.
 func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest) error {
 	session := c.commandSessionID(request)
-	request.Hooks.OnExecuteInit(session)
 
 	stdout, stderr, err := c.stdLogDescriptor(session)
 	if err != nil {
@@ -74,13 +73,13 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	if err != nil {
 		close(done)
 		wg.Wait()
+		request.Hooks.OnExecuteInit(session)
 		request.Hooks.OnExecuteError(&execute.ErrorOutput{EName: "CommandExecError", EValue: err.Error()})
 		request.logCommandError("starting", err)
 		return nil
 	}
 
 	kernel := &commandKernel{
-		callerBound:  request.commandID != "",
 		pid:          cmd.Process.Pid,
 		stdoutPath:   stdoutPath,
 		stderrPath:   stderrPath,
@@ -90,6 +89,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		isBackground: false,
 	}
 	c.storeCommandKernel(session, kernel)
+	request.Hooks.OnExecuteInit(session)
 
 	err = cmd.Wait()
 	close(done)
@@ -163,7 +163,6 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	}
 
 	kernel := &commandKernel{
-		callerBound:  request.commandID != "",
 		pid:          cmd.Process.Pid,
 		content:      request.commandContent(),
 		stdoutPath:   stdoutPath,

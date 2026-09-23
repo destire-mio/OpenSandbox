@@ -34,23 +34,43 @@ import kotlin.time.toJavaDuration
  * session management.
  */
 interface Commands {
-    fun getExecutionInstance(): ExecutionInstance = throw UnsupportedOperationException()
+    /**
+     * Optional recovery capability: discover the scope for a new operation identity.
+     * @throws UnsupportedOperationException if this implementation does not support recovery.
+     */
+    fun getExecutionInstance(): ExecutionInstance =
+        throw UnsupportedOperationException("Execution operation recovery is not supported by this Commands implementation")
 
+    /**
+     * Recover creation state using the saved identity and an [ExecutionOperation] kind constant.
+     * @throws UnsupportedOperationException if this implementation does not support recovery.
+     */
     fun getExecutionOperation(
         kind: String,
         operationId: String,
-    ): ExecutionOperation = throw UnsupportedOperationException()
+    ): ExecutionOperation =
+        throw UnsupportedOperationException("Execution operation recovery is not supported by this Commands implementation")
 
+    /**
+     * Create or reconcile a command using a persisted identity; the result describes creation, not completion.
+     * @throws UnsupportedOperationException if this implementation does not support recovery.
+     */
     fun createCommandOperation(
         operationId: String,
         request: RunCommandRequest,
-    ): ExecutionOperation = throw UnsupportedOperationException()
+    ): ExecutionOperation =
+        throw UnsupportedOperationException("Execution operation recovery is not supported by this Commands implementation")
 
+    /**
+     * Create or reconcile a dormant PTY using a persisted identity, then attach using its recovered ID.
+     * @throws UnsupportedOperationException if this implementation does not support recovery.
+     */
     fun createPTYOperation(
         operationId: String,
         cwd: String = "",
         command: String = "",
-    ): ExecutionOperation = throw UnsupportedOperationException()
+    ): ExecutionOperation =
+        throw UnsupportedOperationException("Execution operation recovery is not supported by this Commands implementation")
 
     /**
      * Executes a shell command in the sandbox environment.

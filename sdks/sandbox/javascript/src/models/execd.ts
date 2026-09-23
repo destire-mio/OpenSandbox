@@ -132,5 +132,7 @@ export interface ExecutionOperation {
 
 /** Generate once before first send. Never refresh scope or timestamp during recovery. */
 export function newOperationId(instance: ExecutionInstance): string {
-  return `${instance.instance_id}.${instance.issued_at}.${globalThis.crypto.randomUUID().replaceAll("-", "")}`;
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  const token = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${instance.instance_id}.${instance.issued_at}.${token}`;
 }

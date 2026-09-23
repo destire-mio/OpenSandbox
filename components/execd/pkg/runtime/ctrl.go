@@ -57,7 +57,6 @@ type jupyterKernel struct {
 }
 
 type commandKernel struct {
-	callerBound  bool
 	pid          int
 	stdoutPath   string
 	stderrPath   string

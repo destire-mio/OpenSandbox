@@ -52,7 +52,7 @@ func TestCreationBodyReadLimit(t *testing.T) {
 			if tt.valid {
 				require.NoError(t, err)
 			} else {
-				require.Error(t, err)
+				require.EqualError(t, err, "operation creation body exceeds 1 MiB")
 			}
 			require.LessOrEqual(t, reader.read, limit+1)
 		})

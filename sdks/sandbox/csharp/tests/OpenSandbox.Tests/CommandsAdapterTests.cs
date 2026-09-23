@@ -58,8 +58,9 @@ public class CommandsAdapterTests
         values.Should().OnlyContain(value => value.IssuedAt == 1);
         values[0].Should().NotBeSameAs(values[1]);
         (await adapter.GetExecutionInstanceAsync()).Should().NotBeSameAs(values[0]);
-        typeof(CommandsAdapter).GetField("_instanceFetchedAt", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .SetValue(adapter, Stopwatch.GetTimestamp() - 60L * Stopwatch.Frequency);
+        var fetchedAt = typeof(CommandsAdapter).GetField("_instanceFetchedAt", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(fetchedAt);
+        fetchedAt.SetValue(adapter, Stopwatch.GetTimestamp() - 60L * Stopwatch.Frequency);
         (await adapter.GetExecutionInstanceAsync()).IssuedAt.Should().Be(2);
     }
 
@@ -73,6 +74,81 @@ public class CommandsAdapterTests
         await Assert.ThrowsAsync<SandboxApiException>(() => adapter.GetExecutionInstanceAsync());
         (await adapter.GetExecutionInstanceAsync()).InstanceId.Should().Be("scope");
         calls.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task ExecutionInstanceOwnerCancellation_ShouldLeaveSharedFetchRunning()
+    {
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        var adapter = CreateAdapter(new StubHttpMessageHandler(async (_, token) =>
+        {
+            Interlocked.Increment(ref calls);
+            await release.Task.WaitAsync(token);
+            return InstanceResponse();
+        }));
+        using var cancellation = new CancellationTokenSource();
+        var owner = adapter.GetExecutionInstanceAsync(cancellation.Token);
+        var waiter = adapter.GetExecutionInstanceAsync();
+        try
+        {
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => owner.WaitAsync(TimeSpan.FromSeconds(5)));
+            waiter.IsCompleted.Should().BeFalse();
+            release.TrySetResult(true);
+            (await waiter.WaitAsync(TimeSpan.FromSeconds(5))).InstanceId.Should().Be("scope");
+            (await adapter.GetExecutionInstanceAsync()).InstanceId.Should().Be("scope");
+            calls.Should().Be(1);
+        }
+        finally { release.TrySetResult(true); }
+    }
+
+    [Theory]
+    [InlineData("command")]
+    [InlineData("pty")]
+    [InlineData("lookup")]
+    public async Task OperationConflict_ShouldPreserveCachedInstance(string method)
+    {
+        var gets = 0;
+        var adapter = CreateAdapter(new StubHttpMessageHandler((request, _) => Task.FromResult(
+            request.RequestUri!.AbsolutePath == "/execution/instance" ? InstanceResponse(++gets) :
+            new HttpResponseMessage(HttpStatusCode.Conflict)
+            {
+                Content = new StringContent("{\"code\":\"operation_conflict\",\"message\":\"different request\"}")
+            })));
+        (await adapter.GetExecutionInstanceAsync()).IssuedAt.Should().Be(1);
+        await Assert.ThrowsAsync<SandboxApiException>(() => method switch
+        {
+            "command" => adapter.CreateCommandOperationAsync("saved.identity", "true"),
+            "pty" => adapter.CreatePtyOperationAsync("saved.identity"),
+            _ => adapter.GetExecutionOperationAsync("command", "saved.identity")
+        });
+        (await adapter.GetExecutionInstanceAsync()).IssuedAt.Should().Be(1);
+        gets.Should().Be(1);
+    }
+
+    [Theory]
+    [InlineData(200, "")]
+    [InlineData(202, "{")]
+    [InlineData(200, "null")]
+    public async Task OperationLookup_InvalidResponse_ShouldUseSdkException(int status, string content)
+    {
+        var adapter = CreateAdapter(new StubHttpMessageHandler((_, _) => Task.FromResult(
+            new HttpResponseMessage((HttpStatusCode)status) { Content = new StringContent(content) })));
+        var error = await Assert.ThrowsAsync<SandboxApiException>(() => adapter.GetExecutionOperationAsync("command", "saved.identity"));
+        error.StatusCode.Should().Be(status);
+    }
+
+    [Theory]
+    [InlineData(null, "saved.identity")]
+    [InlineData("", "saved.identity")]
+    [InlineData("Command", "saved.identity")]
+    [InlineData("command", null)]
+    [InlineData("pty", " ")]
+    public async Task OperationLookup_InvalidInput_ShouldFailBeforeSending(string? kind, string? operationId)
+    {
+        var adapter = CreateAdapter(new StubHttpMessageHandler((_, _) => throw new InvalidOperationException("Unexpected request")));
+        await Assert.ThrowsAsync<InvalidArgumentException>(() => adapter.GetExecutionOperationAsync(kind!, operationId!));
     }
 
     [Theory]
@@ -171,8 +247,41 @@ public class CommandsAdapterTests
         {
             await Assert.ThrowsAsync<InvalidArgumentException>(() => commands.RunAsync(argv));
             Assert.Throws<InvalidArgumentException>(() => commands.RunStreamAsync(argv));
+            await Assert.ThrowsAsync<InvalidArgumentException>(() => commands.CreateCommandOperationAsync("saved.identity", argv));
         }
         requests.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task NativeOperationCreation_ShouldPreserveArgvAndOptions()
+    {
+        string[] argv = ["tool", "", "a b", "$HOME", "中文"];
+        var handler = new StubHttpMessageHandler(async (request, cancellationToken) =>
+        {
+            request.RequestUri!.AbsolutePath.Should().Be("/command/operations");
+            using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync());
+            var json = body.RootElement;
+            json.GetProperty("operation_id").GetString().Should().Be("saved.identity");
+            json.GetProperty("argv").EnumerateArray().Select(item => item.GetString()).Should().Equal(argv);
+            json.TryGetProperty("command", out _).Should().BeFalse();
+            json.GetProperty("cwd").GetString().Should().Be("/tmp");
+            json.GetProperty("timeout").GetInt64().Should().Be(2000);
+            json.GetProperty("background").GetBoolean().Should().BeTrue();
+            json.GetProperty("uid").GetInt32().Should().Be(1000);
+            json.GetProperty("gid").GetInt32().Should().Be(1001);
+            json.GetProperty("envs").GetProperty("A").GetString().Should().Be("value");
+            return new HttpResponseMessage(HttpStatusCode.Accepted)
+            {
+                Content = new StringContent("{\"id\":\"native\",\"kind\":\"command\",\"state\":\"creating\",\"expires_at\":\"2026-09-09T00:00:00Z\"}")
+            };
+        });
+        IExecdCommands commands = CreateAdapter(handler);
+        var operation = await commands.CreateCommandOperationAsync("saved.identity", argv, new RunCommandOptions
+        {
+            WorkingDirectory = "/tmp", TimeoutSeconds = 2, Background = true,
+            Uid = 1000, Gid = 1001, Envs = new Dictionary<string, string> { ["A"] = "value" }
+        });
+        operation.Id.Should().Be("native");
     }
 
     [Theory]

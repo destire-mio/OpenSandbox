@@ -16,12 +16,56 @@ package runtime
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+// Keep a native foreground child alive without relying on a platform's shell.
+func TestOperationCommandHelper(t *testing.T) {
+	if os.Getenv("EXECD_OPERATION_HELPER") != "1" {
+		return
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(os.Getenv("EXECD_OPERATION_RELEASE")); err == nil {
+			os.Exit(0)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	os.Exit(1)
+}
+
+func TestForegroundOperationCreatedBeforeCommandCompletes(t *testing.T) {
+	executable, err := os.Executable()
+	require.NoError(t, err)
+	release := filepath.Join(t.TempDir(), "release")
+	c := NewController("", "")
+	key := testOperationID(c, "foreground-running")
+	op, err := c.CreateCommandOperation("owner", key, &ExecuteCodeRequest{
+		Language: Command,
+		Argv:     []string{executable, "-test.run=^TestOperationCommandHelper$"},
+		Envs:     map[string]string{"EXECD_OPERATION_HELPER": "1", "EXECD_OPERATION_RELEASE": release},
+		Timeout:  10 * time.Second,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, os.WriteFile(release, nil, 0600))
+		require.Eventually(t, func() bool {
+			status, err := c.GetCommandStatus(op.ID)
+			return err == nil && !status.Running
+		}, 5*time.Second, 10*time.Millisecond)
+	})
+	created := awaitOperationCreated(t, c, "command", key)
+	require.Equal(t, op.ID, created.ID)
+	status, err := c.GetCommandStatus(op.ID)
+	require.NoError(t, err)
+	require.True(t, status.Running, "creation must resolve while the foreground child is running")
+}
 
 func testOperationID(c *Controller, suffix string) string {
 	i := c.GetOperationInstance()

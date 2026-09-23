@@ -20,7 +20,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"maps"
 	"net/http"
 	"net/url"
 	"sync"
@@ -86,8 +85,11 @@ func (e *ExecdClient) GetExecutionInstance(ctx context.Context) (*ExecutionInsta
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-pending.done:
+			if pending.err != nil {
+				return nil, pending.err
+			}
 			result := pending.value
-			return &result, pending.err
+			return &result, nil
 		}
 	}
 	pending := &executionInstanceFetch{done: make(chan struct{})}
@@ -109,7 +111,10 @@ func (e *ExecdClient) GetExecutionInstance(ctx context.Context) (*ExecutionInsta
 	}
 	close(pending.done)
 	cache.Unlock()
-	return &result, err
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
 }
 
 func (e *ExecdClient) invalidateOperationInstance(err error) {
@@ -125,17 +130,14 @@ func (e *ExecdClient) invalidateOperationInstance(err error) {
 }
 
 func (e *ExecdClient) GetExecutionOperation(ctx context.Context, kind, operationID string) (*ExecutionOperation, error) {
-	// Per-call copy prevents concurrent lookups from sharing a mutable identity header.
-	client := *e.client
-	client.headers = maps.Clone(e.client.headers)
-	if client.headers == nil {
-		client.headers = make(map[string]string)
-	}
-	client.headers["X-EXECD-OPERATION-ID"] = operationID
 	var result ExecutionOperation
-	err := client.doRequest(ctx, http.MethodGet, "/execution/operation?kind="+url.QueryEscape(kind), nil, &result)
+	err := e.client.doRequestWithHeaders(ctx, http.MethodGet, "/execution/operation?kind="+url.QueryEscape(kind), nil, &result,
+		map[string]string{"X-EXECD-OPERATION-ID": operationID})
 	e.invalidateOperationInstance(err)
-	return &result, err
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
 }
 
 // CreateCommandOperation opts into JSON creation acknowledgement (no SSE). Reuse
@@ -151,7 +153,10 @@ func (e *ExecdClient) CreateCommandOperation(ctx context.Context, operationID st
 	var result ExecutionOperation
 	err := e.client.doRequest(ctx, http.MethodPost, "/command/operations", body, &result)
 	e.invalidateOperationInstance(err)
-	return &result, err
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
 }
 
 // CreatePTYOperation creates/reconciles a dormant session. Connect its recovered
@@ -168,5 +173,8 @@ func (e *ExecdClient) CreatePTYOperation(ctx context.Context, operationID, cwd, 
 	var result ExecutionOperation
 	err := e.client.doRequest(ctx, http.MethodPost, "/pty/operations", body, &result)
 	e.invalidateOperationInstance(err)
-	return &result, err
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
 }

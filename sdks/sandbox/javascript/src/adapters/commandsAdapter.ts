@@ -133,6 +133,8 @@ export interface CommandsAdapterOptions {
   headers?: Record<string, string>;
 }
 
+const INSTANCE_CACHE_TTL_MS = 60_000;
+
 export class CommandsAdapter implements ExecdCommands, ExecutionOperations {
   private readonly fetch: typeof fetch;
   private instanceCache?: { started: number; value: ExecutionInstance };
@@ -146,7 +148,7 @@ export class CommandsAdapter implements ExecdCommands, ExecutionOperations {
   }
 
   async getExecutionInstance(): Promise<ExecutionInstance> {
-    if (this.instanceCache && performance.now() - this.instanceCache.started < 60_000) {
+    if (this.instanceCache && performance.now() - this.instanceCache.started < INSTANCE_CACHE_TTL_MS) {
       return { ...this.instanceCache.value };
     }
     const pending = this.instanceFetch ??= {
@@ -180,6 +182,7 @@ export class CommandsAdapter implements ExecdCommands, ExecutionOperations {
   }
 
   async getExecutionOperation(kind: "command" | "pty", operationId: string): Promise<ExecutionOperation> {
+    assertNonBlank(operationId, "operationId");
     const { data, error, response } = await this.client.GET("/execution/operation", {
       params: { query: { kind }, header: { "X-EXECD-OPERATION-ID": operationId } },
     });

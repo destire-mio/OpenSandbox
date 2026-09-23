@@ -393,7 +393,7 @@ func (c *Controller) CreateCommandOperation(principal, identity string, request 
 				}
 				finishedAt, exitCode := time.Now(), 255
 				c.storeCommandKernel(req.commandID, &commandKernel{
-					callerBound: true, content: req.commandContent(),
+					content:   req.commandContent(),
 					startedAt: startedAt, finishedAt: &finishedAt,
 					exitCode: &exitCode, errMsg: launchError,
 					isBackground: req.Language == BackgroundCommand,

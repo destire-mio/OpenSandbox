@@ -464,15 +464,18 @@ class CommandsAdapter(Commands):
         from opensandbox.api.execd.api.command import get_execution_instance
         from opensandbox.api.execd.models import ExecutionInstance as ApiInstance
 
-        response = await get_execution_instance.asyncio_detailed(
-            client=await self._get_client()
-        )
-        handle_api_error(response, "Get execution instance")
-        parsed = require_parsed(response, ApiInstance, "Get execution instance")
-        result = ExecutionInstance.model_validate(parsed.to_dict())
-        if generation == self._instance_generation:
-            self._instance_cache = (started, result)
-        return result
+        try:
+            response = await get_execution_instance.asyncio_detailed(
+                client=await self._get_client()
+            )
+            handle_api_error(response, "Get execution instance")
+            parsed = require_parsed(response, ApiInstance, "Get execution instance")
+            result = ExecutionInstance.model_validate(parsed.to_dict())
+            if generation == self._instance_generation:
+                self._instance_cache = (started, result)
+            return result
+        except Exception as e:
+            raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def _handle_operation_error(self, response: object, action: str) -> None:
         try:
@@ -495,14 +498,21 @@ class CommandsAdapter(Commands):
             GetExecutionOperationKind,
         )
 
-        response = await get_execution_operation.asyncio_detailed(
-            client=await self._get_client(),
-            kind=GetExecutionOperationKind(kind),
-            x_execd_operation_id=operation_id,
-        )
-        self._handle_operation_error(response, "Get execution operation")
-        parsed = require_parsed(response, ApiOperation, "Get execution operation")
-        return ExecutionOperation.model_validate(parsed.to_dict())
+        if kind not in ("command", "pty"):
+            raise InvalidArgumentException("kind must be 'command' or 'pty'")
+        if not operation_id or not operation_id.strip():
+            raise InvalidArgumentException("operation_id is required")
+        try:
+            response = await get_execution_operation.asyncio_detailed(
+                client=await self._get_client(),
+                kind=GetExecutionOperationKind(kind),
+                x_execd_operation_id=operation_id,
+            )
+            self._handle_operation_error(response, "Get execution operation")
+            parsed = require_parsed(response, ApiOperation, "Get execution operation")
+            return ExecutionOperation.model_validate(parsed.to_dict())
+        except Exception as e:
+            raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def create_command_operation(
         self,
@@ -518,20 +528,23 @@ class CommandsAdapter(Commands):
 
         if not operation_id:
             raise InvalidArgumentException("operation_id is required")
-        body = ExecutionConverter.to_api_run_command_request(
-            command, opts or RunCommandOpts()
-        )
-        from opensandbox.api.execd.models import CreateCommandOperationRequest
+        try:
+            body = ExecutionConverter.to_api_run_command_request(
+                command, opts or RunCommandOpts()
+            )
+            from opensandbox.api.execd.models import CreateCommandOperationRequest
 
-        creation_body = CreateCommandOperationRequest.from_dict(
-            {**body.to_dict(), "operation_id": operation_id}
-        )
-        response = await create_command_operation.asyncio_detailed(
-            client=await self._get_client(), body=creation_body
-        )
-        self._handle_operation_error(response, "Create command operation")
-        parsed = require_parsed(response, ApiOperation, "Create command operation")
-        return ExecutionOperation.model_validate(parsed.to_dict())
+            creation_body = CreateCommandOperationRequest.from_dict(
+                {**body.to_dict(), "operation_id": operation_id}
+            )
+            response = await create_command_operation.asyncio_detailed(
+                client=await self._get_client(), body=creation_body
+            )
+            self._handle_operation_error(response, "Create command operation")
+            parsed = require_parsed(response, ApiOperation, "Create command operation")
+            return ExecutionOperation.model_validate(parsed.to_dict())
+        except Exception as e:
+            raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def create_pty_operation(
         self,
@@ -548,12 +561,15 @@ class CommandsAdapter(Commands):
 
         if not operation_id:
             raise InvalidArgumentException("operation_id is required")
-        response = await create_pty_operation.asyncio_detailed(
-            client=await self._get_client(),
-            body=CreatePTYOperationRequest(
-                operation_id=operation_id, cwd=cwd, command=command
-            ),
-        )
-        self._handle_operation_error(response, "Create PTY operation")
-        parsed = require_parsed(response, ApiOperation, "Create PTY operation")
-        return ExecutionOperation.model_validate(parsed.to_dict())
+        try:
+            response = await create_pty_operation.asyncio_detailed(
+                client=await self._get_client(),
+                body=CreatePTYOperationRequest(
+                    operation_id=operation_id, cwd=cwd, command=command
+                ),
+            )
+            self._handle_operation_error(response, "Create PTY operation")
+            parsed = require_parsed(response, ApiOperation, "Create PTY operation")
+            return ExecutionOperation.model_validate(parsed.to_dict())
+        except Exception as e:
+            raise ExceptionConverter.to_sandbox_exception(e) from e

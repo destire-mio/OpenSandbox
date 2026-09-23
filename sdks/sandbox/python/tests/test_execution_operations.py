@@ -25,10 +25,111 @@ import pytest
 
 from opensandbox.adapters.command_adapter import CommandsAdapter
 from opensandbox.config import ConnectionConfig
-from opensandbox.exceptions import SandboxApiException
+from opensandbox.exceptions import (
+    InvalidArgumentException,
+    SandboxApiException,
+    SandboxConnectionException,
+    SandboxTimeoutException,
+)
 from opensandbox.models.execd import RunCommandOpts
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.sync.adapters.command_adapter import CommandsAdapterSync
+
+
+@pytest.mark.parametrize(
+    "method,args",
+    [
+        ("get_execution_instance", ()),
+        ("get_execution_operation", ("command", "scope.123.persisted")),
+        ("create_command_operation", ("scope.123.persisted", "true")),
+        ("create_pty_operation", ("scope.123.persisted",)),
+    ],
+)
+@pytest.mark.parametrize(
+    "failure,expected",
+    [
+        (httpx.ConnectError, SandboxConnectionException),
+        (httpx.ReadTimeout, SandboxTimeoutException),
+        (None, SandboxApiException),
+    ],
+)
+@pytest.mark.asyncio
+async def test_recovery_transport_errors_use_sdk_exceptions(
+    method, args, failure, expected
+):
+    def handler(request):
+        if failure is not None:
+            raise failure("response lost", request=request)
+        return httpx.Response(418, content=b"unexpected status")
+
+    adapter = CommandsAdapter(
+        ConnectionConfig(), SandboxEndpoint(endpoint="localhost:44772")
+    )
+    adapter._client.raise_on_unexpected_status = True
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://localhost:44772"
+    ) as client:
+        adapter._client.set_async_httpx_client(client)
+        try:
+            with pytest.raises(expected) as caught:
+                await getattr(adapter, method)(*args)
+            assert caught.value.__cause__ is not None
+        finally:
+            await adapter._httpx_client.aclose()
+            await adapter._sse_client.aclose()
+
+    sync = CommandsAdapterSync(
+        ConnectionConfig(), SandboxEndpoint(endpoint="localhost:44772")
+    )
+    sync._client.raise_on_unexpected_status = True
+    with httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="http://localhost:44772"
+    ) as client:
+        sync._client.set_httpx_client(client)
+        try:
+            with pytest.raises(expected) as caught:
+                getattr(sync, method)(*args)
+            assert caught.value.__cause__ is not None
+        finally:
+            sync._httpx_client.close()
+            sync._sse_client.close()
+
+
+@pytest.mark.parametrize(
+    "kind,identity",
+    [("Command", "saved.identity"), ("", "saved.identity"), ("command", " ")],
+)
+@pytest.mark.asyncio
+async def test_operation_lookup_rejects_invalid_input(kind, identity):
+    def handler(request):
+        pytest.fail("invalid input must not send an HTTP request")
+
+    adapter = CommandsAdapter(
+        ConnectionConfig(), SandboxEndpoint(endpoint="localhost:44772")
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://localhost:44772"
+    ) as client:
+        adapter._client.set_async_httpx_client(client)
+        try:
+            with pytest.raises(InvalidArgumentException):
+                await adapter.get_execution_operation(kind, identity)
+        finally:
+            await adapter._httpx_client.aclose()
+            await adapter._sse_client.aclose()
+    sync = CommandsAdapterSync(
+        ConnectionConfig(), SandboxEndpoint(endpoint="localhost:44772")
+    )
+    with httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="http://localhost:44772"
+    ) as client:
+        sync._client.set_httpx_client(client)
+        try:
+            with pytest.raises(InvalidArgumentException):
+                sync.get_execution_operation(kind, identity)
+        finally:
+            sync._httpx_client.close()
+            sync._sse_client.close()
 
 
 def transport_handler(request):

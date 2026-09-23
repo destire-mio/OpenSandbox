@@ -196,14 +196,20 @@ func NewClient(baseURL, apiKey, authHeader string, opts ...Option) *Client {
 // not retried and cannot double the effective timeout. This is always on and
 // independent of the opt-in RetryConfig.
 func (c *Client) doRequest(ctx context.Context, method, path string, body any, result any) error {
+	return c.doRequestWithHeaders(ctx, method, path, body, result, nil)
+}
+
+// doRequestWithHeaders applies call-local headers without copying or mutating the
+// shared client. Every retry builds its own request with the same headers.
+func (c *Client) doRequestWithHeaders(ctx context.Context, method, path string, body any, result any, headers map[string]string) error {
 	return c.withRetry(ctx, func() error {
 		var reused bool
-		err := c.doRequestOnce(ctx, method, path, body, result, &reused)
+		err := c.doRequestOnce(ctx, method, path, body, result, &reused, headers)
 		if err != nil && reused && c.shouldRetryOnFreshConn(ctx, method, err) {
 			// The reused pooled connection was likely silently dropped by an
 			// intermediary. Drop idle connections so the retry dials a new one.
 			c.httpClient.CloseIdleConnections()
-			err = c.doRequestOnce(ctx, method, path, body, result, nil)
+			err = c.doRequestOnce(ctx, method, path, body, result, nil, headers)
 		}
 		return err
 	})
@@ -246,7 +252,7 @@ func (c *Client) shouldRetryOnFreshConn(ctx context.Context, method string, err 
 // doRequestOnce is the single-attempt implementation of doRequest. If reused is
 // non-nil it is set to whether this attempt was carried over a reused pooled
 // connection (observed via httptrace GotConn).
-func (c *Client) doRequestOnce(ctx context.Context, method, path string, body any, result any, reused *bool) error {
+func (c *Client) doRequestOnce(ctx context.Context, method, path string, body any, result any, reused *bool, headers map[string]string) error {
 	var bodyReader io.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
@@ -271,6 +277,9 @@ func (c *Client) doRequestOnce(ctx context.Context, method, path string, body an
 
 	req.Header.Set("User-Agent", "OpenSandbox-Go-SDK/"+Version)
 	for k, v := range c.headers {
+		req.Header.Set(k, v)
+	}
+	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
 	if c.apiKey != "" {

@@ -742,11 +742,11 @@ func isCallerBoundPTY(session runtime.PTYSession) bool {
 }
 
 func writePTYStartError(conn *websocket.Conn, id string, err error, callerBound bool) {
+	log.Warn("pty start failed for session %s: %v", id, err)
 	if callerBound {
 		writeErrFrame(conn, model.WSErrCodeStartFailed, "caller-bound session launch failed; no automatic reattempt")
 		return
 	}
-	log.Warn("pty start failed for session %s: %v", id, err)
 	writeErrFrame(conn, model.WSErrCodeStartFailed, err.Error())
 }
 

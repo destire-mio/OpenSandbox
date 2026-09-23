@@ -65,6 +65,28 @@ function instanceAdapter(fetch) {
 
 const instanceBody = (issuedAt = 123) => ({ instance_id: "scope", issued_at: issuedAt, retention_seconds: 86400, capacity: 4096 });
 
+test("operation identity works without secure-context randomUUID", (t) => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis.crypto, "randomUUID");
+  Object.defineProperty(globalThis.crypto, "randomUUID", { value: undefined, configurable: true });
+  t.after(() => {
+    if (descriptor) Object.defineProperty(globalThis.crypto, "randomUUID", descriptor);
+    else delete globalThis.crypto.randomUUID;
+  });
+  t.mock.method(globalThis.crypto, "getRandomValues", (bytes) => {
+    assert.equal(bytes.length, 16);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = i;
+    return bytes;
+  });
+  assert.equal(newOperationId(instanceBody()), "scope.123.000102030405060708090a0b0c0d0e0f");
+});
+
+test("operation lookup rejects blank identities before sending", async () => {
+  const adapter = instanceAdapter(() => assert.fail("unexpected HTTP request"));
+  for (const identity of ["", " ", "\t"]) {
+    await assert.rejects(adapter.getExecutionOperation("command", identity), /operationId cannot be empty/);
+  }
+});
+
 test("instance cache coalesces requests, isolates snapshots and expires from fetch start", async (t) => {
   let now = 0;
   t.mock.method(performance, "now", () => now);

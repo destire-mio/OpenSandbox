@@ -73,6 +73,8 @@ internal class CommandsAdapter(
     companion object {
         private const val RUN_COMMAND_PATH = "/command"
         private const val SESSION_PATH_SEGMENT = "session"
+        private val INSTANCE_CACHE_TTL_NANOS = TimeUnit.MINUTES.toNanos(1)
+        private val INSTANCE_INVALIDATION_CODES = setOf("operation_instance_mismatch", "operation_expired")
     }
 
     private val commandJson = Json(jsonParser) { explicitNulls = false }
@@ -108,7 +110,7 @@ internal class CommandsAdapter(
         val started: Long
         synchronized(instanceLock) {
             cachedInstance?.let {
-                if (System.nanoTime() - instanceFetchedAt < TimeUnit.MINUTES.toNanos(1)) return it.copy()
+                if (System.nanoTime() - instanceFetchedAt < INSTANCE_CACHE_TTL_NANOS) return it.copy()
             }
             pending = instancePending ?: CompletableFuture<ExecutionInstance>().also {
                 instancePending = it
@@ -128,8 +130,14 @@ internal class CommandsAdapter(
                     }
                 }
                 pending.complete(result)
-            } catch (e: Exception) {
-                pending.completeExceptionally(e.toSandboxException())
+            } catch (e: Throwable) {
+                val failure = if (e is Exception) e.toSandboxException() else e
+                pending.completeExceptionally(failure)
+                logger.error(
+                    "Failed to get execution instance (errorCode={})",
+                    (failure as? SandboxException)?.error?.code ?: "non_exception_failure",
+                )
+                if (e !is Exception) throw e
             } finally {
                 synchronized(instanceLock) {
                     if (instancePending === pending) instancePending = null
@@ -139,7 +147,7 @@ internal class CommandsAdapter(
         try {
             return pending.get().copy()
         } catch (e: ExecutionException) {
-            throw (e.cause as? RuntimeException ?: e.toSandboxException())
+            throw (e.cause ?: e.toSandboxException())
         } catch (e: InterruptedException) {
             Thread.currentThread().interrupt()
             throw e.toSandboxException()
@@ -148,13 +156,14 @@ internal class CommandsAdapter(
 
     private fun operationException(error: Exception): SandboxException {
         val converted = error.toSandboxException()
-        if (converted.error.code in setOf("operation_instance_mismatch", "operation_expired")) {
+        if (converted.error.code in INSTANCE_INVALIDATION_CODES) {
             synchronized(instanceLock) {
                 cachedInstance = null
                 instancePending = null
                 instanceGeneration++
             }
         }
+        logger.error("Execution operation failed (errorCode={})", converted.error.code)
         return converted
     }
 
@@ -162,8 +171,15 @@ internal class CommandsAdapter(
         kind: String,
         operationId: String,
     ): ExecutionOperation {
+        if (operationId.isBlank()) throw InvalidArgumentException("operationId is required")
+        val apiKind =
+            when (kind) {
+                ExecutionOperation.KIND_COMMAND -> CommandApi.KindGetExecutionOperation.command
+                ExecutionOperation.KIND_PTY -> CommandApi.KindGetExecutionOperation.pty
+                else -> throw InvalidArgumentException("kind must be 'command' or 'pty'")
+            }
         try {
-            return commandApi.getExecutionOperation(CommandApi.KindGetExecutionOperation.valueOf(kind), operationId).toOperation()
+            return commandApi.getExecutionOperation(apiKind, operationId).toOperation()
         } catch (e: Exception) {
             throw operationException(e)
         }

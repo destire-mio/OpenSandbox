@@ -36,4 +36,12 @@ data class ExecutionOperation(
     val kind: String,
     val state: String,
     val expiresAt: OffsetDateTime,
-)
+) {
+    companion object {
+        const val KIND_COMMAND = "command"
+        const val KIND_PTY = "pty"
+        const val STATE_CREATING = "creating"
+        const val STATE_CREATED = "created"
+        const val STATE_FAILED = "failed"
+    }
+}

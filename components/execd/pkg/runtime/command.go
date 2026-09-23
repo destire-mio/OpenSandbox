@@ -282,7 +282,6 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	}
 
 	kernel := &commandKernel{
-		callerBound:  request.commandID != "",
 		pid:          cmd.Process.Pid,
 		stdoutPath:   stdoutPath,
 		stderrPath:   stderrPath,
@@ -422,7 +421,6 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 
 	mp, err := launchManaged(cmd)
 	kernel := &commandKernel{
-		callerBound:  request.commandID != "",
 		pid:          -1,
 		stdoutPath:   stdoutPath,
 		stderrPath:   stderrPath,

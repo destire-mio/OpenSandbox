@@ -436,43 +436,43 @@ paths:
         schema:
           $ref: '#/components/schemas/ExecutionOperationID'
       responses:
-        '200': &id001
+        '200':
           description: 'Creation outcome: created or failed; not execution completion'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ExecutionOperation'
-        '202': &id002
+        '202':
           description: Creation in progress; query or repeat the same immutable request
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ExecutionOperation'
-        '400': &id003
+        '400':
           description: Invalid identity or request
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-        '401': &id004
+        '401':
           description: Authentication required
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-        '409': &id005
+        '409':
           description: operation_conflict or operation_instance_mismatch; never refresh identity to retry an unknown outcome
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-        '410': &id006
+        '410':
           description: operation_expired; execution outcome unknown, no new process created
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-        '503': &id007
+        '503':
           description: operation_capacity_exceeded; creation refused; unexpired and active entries are not evicted
           content:
             application/json:

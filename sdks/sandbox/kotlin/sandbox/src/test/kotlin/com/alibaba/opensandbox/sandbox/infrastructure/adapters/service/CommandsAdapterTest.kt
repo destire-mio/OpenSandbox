@@ -43,6 +43,7 @@ import okhttp3.mockwebserver.RecordedRequest
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotSame
+import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
@@ -50,7 +51,9 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import java.time.Duration
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
+import java.util.concurrent.FutureTask
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -59,6 +62,67 @@ class CommandsAdapterTest {
         MockResponse().setBody(
             """{"instance_id":"scope","issued_at":$issuedAt,"retention_seconds":86400,"capacity":4096}""",
         )
+
+    @Test
+    fun `fatal instance fetch failure releases joined callers and permits another fetch`() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val calls = AtomicInteger()
+        val failure = AssertionError("simulated decoder failure")
+        val headers =
+            object : AbstractMap<String, String>() {
+                override val entries: Set<Map.Entry<String, String>>
+                    get() {
+                        if (calls.incrementAndGet() == 1) {
+                            entered.countDown()
+                            check(release.await(5, TimeUnit.SECONDS))
+                            throw failure
+                        }
+                        return emptySet()
+                    }
+            }
+        val adapter = CommandsAdapter(httpClientProvider, SandboxEndpoint("${mockWebServer.hostName}:${mockWebServer.port}", headers))
+        val owner = FutureTask { adapter.getExecutionInstance() }
+        val joined = FutureTask { adapter.getExecutionInstance() }
+        val ownerThread = Thread(owner)
+        val joinedThread = Thread(joined)
+        try {
+            ownerThread.start()
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            joinedThread.start()
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (joinedThread.state != Thread.State.WAITING && System.nanoTime() < deadline) Thread.sleep(1)
+            assertEquals(Thread.State.WAITING, joinedThread.state)
+            release.countDown()
+            assertSame(failure, assertThrows<ExecutionException> { owner.get(5, TimeUnit.SECONDS) }.cause)
+            assertSame(failure, assertThrows<ExecutionException> { joined.get(5, TimeUnit.SECONDS) }.cause)
+            mockWebServer.enqueue(instanceResponse())
+            assertEquals("scope", adapter.getExecutionInstance().instanceId)
+            assertEquals(1, mockWebServer.requestCount)
+        } finally {
+            release.countDown()
+            ownerThread.interrupt()
+            joinedThread.interrupt()
+            ownerThread.join(5000)
+            joinedThread.join(5000)
+        }
+    }
+
+    @Test
+    fun `operation lookup validates input before sending`() {
+        for ((kind, identity) in listOf("Command" to "saved.identity", "" to "saved.identity", "command" to " ")) {
+            assertThrows<InvalidArgumentException> { commandsAdapter.getExecutionOperation(kind, identity) }
+        }
+        assertEquals(0, mockWebServer.requestCount)
+    }
+
+    @Test
+    fun `command request builder rejects empty input before operation creation`() {
+        assertThrows<IllegalArgumentException> { RunCommandRequest.builder().command("").build() }
+        assertThrows<IllegalArgumentException> { RunCommandRequest.builder().build() }
+        assertThrows<IllegalArgumentException> { RunCommandRequest.builder().argv(emptyList()).build() }
+        assertEquals(0, mockWebServer.requestCount)
+    }
 
     @Test
     fun `instance cache shares requests and returns independent snapshots until expiry`() {

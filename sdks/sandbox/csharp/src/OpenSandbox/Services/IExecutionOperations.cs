@@ -22,6 +22,7 @@ public interface IExecutionOperations
     Task<ExecutionInstance> GetExecutionInstanceAsync(CancellationToken cancellationToken = default);
     Task<ExecutionOperation> GetExecutionOperationAsync(string kind, string operationId, CancellationToken cancellationToken = default);
     Task<ExecutionOperation> CreateCommandOperationAsync(string operationId, string command, RunCommandOptions? options = null, CancellationToken cancellationToken = default);
+    Task<ExecutionOperation> CreateCommandOperationAsync(string operationId, IReadOnlyList<string> argv, RunCommandOptions? options = null, CancellationToken cancellationToken = default);
     Task<ExecutionOperation> CreatePtyOperationAsync(string operationId, string? cwd = null, string? command = null, CancellationToken cancellationToken = default);
 }
 
@@ -42,4 +43,7 @@ public static class ExecutionOperationExtensions
 
     public static Task<ExecutionOperation> CreatePtyOperationAsync(this IExecdCommands commands, string operationId, string? cwd = null, string? command = null, CancellationToken cancellationToken = default)
         => Operations(commands).CreatePtyOperationAsync(operationId, cwd, command, cancellationToken);
+
+    public static Task<ExecutionOperation> CreateCommandOperationAsync(this IExecdCommands commands, string operationId, IReadOnlyList<string> argv, RunCommandOptions? options = null, CancellationToken cancellationToken = default)
+        => Operations(commands).CreateCommandOperationAsync(operationId, argv, options, cancellationToken);
 }

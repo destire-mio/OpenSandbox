@@ -42,6 +42,10 @@ func (c *basicController) decodeCreation(target any, callerBound bool) error {
 	source := json.NewDecoder(http.MaxBytesReader(c.ctx.Writer, c.ctx.Request.Body, 1<<20))
 	err := source.Decode(&raw)
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return errors.New("operation creation body exceeds 1 MiB")
+		}
 		if errors.Is(err, io.EOF) {
 			return io.EOF
 		}
@@ -55,20 +59,19 @@ func (c *basicController) decodeCreation(target any, callerBound bool) error {
 		return errors.New("invalid creation JSON")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
-	if callerBound {
-		if len(raw) > 1<<20 {
+	var trailing any
+	if err = source.Decode(&trailing); err != io.EOF {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
 			return errors.New("operation creation body exceeds 1 MiB")
 		}
-		var trailing any
-		if source.Decode(&trailing) != io.EOF {
-			return errors.New("unexpected trailing creation data")
-		}
-		var identity string
-		if json.Unmarshal(fields["operation_id"], &identity) != nil || identity == "" {
-			return errors.New("operation_id must be a nonempty string")
-		}
-		decoder.DisallowUnknownFields()
+		return errors.New("unexpected trailing creation data")
 	}
+	var identity string
+	if json.Unmarshal(fields["operation_id"], &identity) != nil || identity == "" {
+		return errors.New("operation_id must be a nonempty string")
+	}
+	decoder.DisallowUnknownFields()
 	if request, ok := target.(*model.RunCommandRequest); ok {
 		// UnmarshalJSON handles command/argv presence but bypasses the outer
 		// decoder's unknown-field check. Check a method-free alias first,

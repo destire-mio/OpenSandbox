@@ -205,3 +205,76 @@ func TestExecutionInstanceFailureIsNotCached(t *testing.T) {
 	require.Equal(t, "scope", instance.InstanceID)
 	require.Equal(t, 2, calls)
 }
+
+func TestExecutionOperationHeadersDuringConcurrentStreams(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-EXECD-ACCESS-TOKEN") != "token" || r.Header.Get("X-Custom") != "preserved" {
+			t.Error("client headers were lost")
+		}
+		if r.URL.Path == "/execution/operation" {
+			fmt.Fprintf(w, `{"id":%q,"kind":"command","state":"created"}`, r.Header.Get("X-EXECD-OPERATION-ID"))
+			return
+		}
+		if r.Header.Get("X-EXECD-OPERATION-ID") != "" {
+			t.Error("operation identity leaked into another request")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"type\":\"init\",\"text\":\"stream\"}\n\n")
+	}))
+	defer server.Close()
+	for i := 0; i < 32; i++ {
+		client := NewExecdClient(server.URL, "token", WithHeaders(map[string]string{"X-Custom": "preserved"}))
+		start := make(chan struct{})
+		var workers sync.WaitGroup
+		for j := 0; j < 4; j++ {
+			workers.Add(1)
+			go func(j int) {
+				defer workers.Done()
+				<-start
+				if j == 0 {
+					if err := client.RunCommand(context.Background(), RunCommandRequest{Command: "true"}, func(event StreamEvent) error { return nil }); err != nil {
+						t.Error(err)
+					}
+					return
+				}
+				id := fmt.Sprintf("scope.123.caller-%d", j)
+				operation, err := client.GetExecutionOperation(context.Background(), "command", id)
+				if err != nil || operation == nil || operation.ID != id {
+					t.Errorf("lookup %s returned %#v, %v", id, operation, err)
+				}
+			}(j)
+		}
+		close(start)
+		workers.Wait()
+	}
+}
+
+func TestExecutionOperationsReturnNilOnError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, `{"code":"unavailable","message":"retry later"}`)
+	}))
+	defer server.Close()
+	client := NewExecdClient(server.URL, "token")
+	ctx := context.Background()
+	instance, err := client.GetExecutionInstance(ctx)
+	require.Error(t, err)
+	if instance != nil {
+		t.Errorf("failed discovery returned %#v", instance)
+	}
+	for _, call := range []func() (*ExecutionOperation, error){
+		func() (*ExecutionOperation, error) {
+			return client.GetExecutionOperation(ctx, "command", "saved.identity")
+		},
+		func() (*ExecutionOperation, error) {
+			return client.CreateCommandOperation(ctx, "saved.identity", RunCommandRequest{Command: "true"})
+		},
+		func() (*ExecutionOperation, error) { return client.CreatePTYOperation(ctx, "saved.identity", "", "") },
+	} {
+		operation, err := call()
+		require.Error(t, err)
+		if operation != nil {
+			t.Errorf("failed operation returned %#v", operation)
+		}
+	}
+}
