@@ -1,7 +1,7 @@
 # pyright: reportAttributeAccessIssue=false
 # protobuf-generated modules expose dynamic attributes.
 
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -38,6 +38,7 @@ from opensandbox_server.api.schema import (
     ListSandboxesRequest,
     ListSandboxesResponse,
     NetworkPolicy,
+    NetworkRule,
     PatchSandboxMetadataRequest,
     RenewSandboxExpirationRequest,
     RenewSandboxExpirationResponse,
@@ -45,6 +46,7 @@ from opensandbox_server.api.schema import (
     SandboxStatus,
 )
 from opensandbox_server.config import AppConfig, KubernetesRuntimeConfig
+from opensandbox_server.middleware.request_id import get_request_id
 from opensandbox_server.services.constants import SandboxErrorCodes
 from opensandbox_server.services.diagnostics import (
     DiagnosticResult,
@@ -60,6 +62,7 @@ from opensandbox_server.services.fast_sandbox.fastpath_client import (
     FastPathClient,
     FastPathConflict,
     FastPathError,
+    FastPathFailedPrecondition,
     FastPathInvalidArgument,
     FastPathNotFound,
     FastPathResourceExhausted,
@@ -68,7 +71,12 @@ from opensandbox_server.services.fast_sandbox.fastpath_client import (
 from opensandbox_server.services.fast_sandbox.endpoint import build_endpoint
 from opensandbox_server.services.fast_sandbox.cr_reader import SandboxCRReader
 from opensandbox_server.services.fast_sandbox.cr_mapping import sandbox_from_cr
-from opensandbox_server.services.fast_sandbox.network_policy import normalized_policy, policy_status
+from opensandbox_server.services.fast_sandbox.network_policy import (
+    delete_policy_rules,
+    merge_policy_rules,
+    normalized_policy,
+    policy_status,
+)
 from opensandbox_server.services.templates.template_service import FastSandboxTemplateService
 from opensandbox_server.services.fast_sandbox.generated import fastpath_pb2 as pb2
 from opensandbox_server.services.fast_sandbox.status_mapping import map_reason, map_state
@@ -112,7 +120,6 @@ class FastSandboxService(SandboxService, ExtensionService):
         self._fastpath.close()
 
     def resolve_template_service(self) -> FastSandboxTemplateService:
-        """Lazily create the shared template service."""
         if self._template_service is None:
             self._template_service = FastSandboxTemplateService(self._app_config)
             # Keep template rows converged even without /templates traffic
@@ -378,10 +385,37 @@ class FastSandboxService(SandboxService, ExtensionService):
             self._cr_reader.invalidate(namespace)
 
     def pause_sandbox(self, sandbox_id: str) -> None:
-        raise self._unsupported("pause", status.HTTP_501_NOT_IMPLEMENTED)
+        """Persist the pause intent; PAUSING -> PAUSED completes asynchronously."""
+        metadata = self._get_cr(sandbox_id)["metadata"]
+        namespace = metadata["namespace"]
+        try:
+            self._fastpath.pause_sandbox(
+                namespace,
+                sandbox_id,
+                expected_uid=metadata["uid"],
+                request_id=get_request_id() or "",
+            )
+        except FastPathError as exc:
+            raise self._fastpath_http_error(exc) from exc
+        finally:
+            self._cr_reader.invalidate(namespace)
 
     def resume_sandbox(self, sandbox_id: str) -> None:
-        raise self._unsupported("resume", status.HTTP_501_NOT_IMPLEMENTED)
+        """Persist the resume intent; fast-sandbox restores the checkpoint
+        (possibly on another Fastlet) and routes must be re-resolved."""
+        metadata = self._get_cr(sandbox_id)["metadata"]
+        namespace = metadata["namespace"]
+        try:
+            self._fastpath.resume_sandbox(
+                namespace,
+                sandbox_id,
+                expected_uid=metadata["uid"],
+                request_id=get_request_id() or "",
+            )
+        except FastPathError as exc:
+            raise self._fastpath_http_error(exc) from exc
+        finally:
+            self._cr_reader.invalidate(namespace)
 
     def renew_expiration(
         self,
@@ -520,7 +554,21 @@ class FastSandboxService(SandboxService, ExtensionService):
         return policy_status(policy)
 
     def replace_network_policy(self, sandbox_id: str, policy: NetworkPolicy) -> dict:
-        normalized = normalized_policy(policy)
+        return self._commit_network_policy(sandbox_id, normalized_policy(policy))
+
+    def patch_network_policy(self, sandbox_id: str, rules: list[NetworkRule]) -> dict:
+        """Merge rules into the persisted egress binding (sidecar PATCH semantics)."""
+        current = self.get_network_policy(sandbox_id)
+        merged = merge_policy_rules(current["policy"], rules)
+        return self._commit_network_policy(sandbox_id, normalized_policy(NetworkPolicy.model_validate(merged)))
+
+    def delete_network_policy_rules(self, sandbox_id: str, targets: list[str]) -> dict:
+        """Remove rules by target from the persisted egress binding (idempotent)."""
+        current = self.get_network_policy(sandbox_id)
+        kept = delete_policy_rules(current["policy"], targets)
+        return self._commit_network_policy(sandbox_id, normalized_policy(NetworkPolicy.model_validate(kept)))
+
+    def _commit_network_policy(self, sandbox_id: str, normalized: dict) -> dict:
         current = self._cr_reader.get(self._resolve_namespace(), sandbox_id)
         metadata = current["metadata"]
         bindings = [dict(b) for b in current["spec"].get("actionBindings", [])]
@@ -599,6 +647,14 @@ class FastSandboxService(SandboxService, ExtensionService):
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
                     "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": exc.message,
+                },
+            )
+        if isinstance(exc, FastPathFailedPrecondition):
+            return HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": SandboxErrorCodes.FSB_API_ERROR,
                     "message": exc.message,
                 },
             )

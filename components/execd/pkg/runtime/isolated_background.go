@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -254,7 +254,7 @@ func (r *IsolatedRunner) RunInIsolatedSessionBackground(
 	}
 
 	go r.watchBackgroundRun(s, run)
-	log.Info("started background run %s in session %s", runID, id)
+	log.Info("isolated session: started background run %s (session=%s)", runID, id)
 	return runID, startedAt, nil
 }
 

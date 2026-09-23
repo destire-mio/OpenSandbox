@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -149,12 +149,10 @@ func (c *CodeInterpretingController) runCommand(callerBound bool) {
 	time.Sleep(flag.ApiGracefulShutdownTimeout)
 }
 
-// InterruptCommand stops a running shell command session.
 func (c *CodeInterpretingController) InterruptCommand() {
 	c.interrupt()
 }
 
-// GetCommandStatus returns command status by id.
 func (c *CodeInterpretingController) GetCommandStatus() {
 	commandID := c.ctx.Param("id")
 	if commandID == "" {
@@ -185,7 +183,6 @@ func (c *CodeInterpretingController) GetCommandStatus() {
 	c.RespondSuccess(resp)
 }
 
-// GetBackgroundCommandOutput returns accumulated stdout/stderr for a command session as plain text.
 func (c *CodeInterpretingController) GetBackgroundCommandOutput() {
 	id := c.ctx.Param("id")
 	if id == "" {

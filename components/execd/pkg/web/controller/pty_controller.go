@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,12 +26,10 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
-// PTYController handles /pty/* REST endpoints.
 type PTYController struct {
 	*basicController
 }
 
-// NewPTYController creates a new PTYController from the current Gin context.
 func NewPTYController(ctx *gin.Context) *PTYController {
 	return &PTYController{basicController: newBasicController(ctx)}
 }
@@ -89,7 +87,6 @@ func (c *PTYController) createPTYSession(callerBound bool) {
 	c.ctx.JSON(http.StatusCreated, model.CreatePTYSessionResponse{SessionID: id})
 }
 
-// GetPTYSessionStatus handles GET /pty/:sessionId.
 func (c *PTYController) GetPTYSessionStatus() {
 	if !runtime.IsPTYSessionSupported() {
 		c.RespondError(
@@ -137,7 +134,6 @@ func (c *PTYController) GetPTYSessionStatus() {
 	})
 }
 
-// DeletePTYSession handles DELETE /pty/:sessionId.
 func (c *PTYController) DeletePTYSession() {
 	if !runtime.IsPTYSessionSupported() {
 		c.RespondError(

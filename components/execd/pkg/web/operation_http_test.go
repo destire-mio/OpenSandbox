@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/alibaba/opensandbox/execd/pkg/binding"
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 	"github.com/gorilla/websocket"
 	"io"
@@ -115,6 +116,42 @@ func decodeOperation(t *testing.T, status int, body []byte) runtime.Operation {
 	require.NoError(t, json.Unmarshal(body, &op))
 	require.NotEmpty(t, op.ID)
 	return op
+}
+
+func TestOperationRecoveryUsesRuntimeBindingPrincipal(t *testing.T) {
+	withRuntimeInit(t, false)
+	owner := &binding.RuntimeBinding{
+		SandboxID: "sandbox-1", Generation: 1,
+		HasAccessToken: true, AccessTokenHash: mustHash(t, "test-token"),
+	}
+	withTestBinding(t, owner)
+	ctrl := controller.InitCodeRunner()
+	server := httptest.NewServer(NewRouter("legacy-token"))
+	defer server.Close()
+	key := operationIdentity(t, server.URL, "binding-principal")
+	status, body := postOperation(t, server.URL, "/pty/operations", map[string]any{
+		"operation_id": key, "command": "true",
+	})
+	op := decodeOperation(t, status, body)
+	t.Cleanup(func() { _ = ctrl.DeletePTYSession(op.ID) })
+	require.Eventually(t, func() bool {
+		status, body := getOperationHTTP(t, server.URL, "/execution/operation?kind=pty", key, "test-token")
+		return decodeOperation(t, status, body).State == "created"
+	}, 5*time.Second, time.Millisecond)
+
+	binding.Apply(&binding.RuntimeBinding{
+		SandboxID: "sandbox-1", Generation: 2,
+		HasAccessToken: true, AccessTokenHash: mustHash(t, "other-token"),
+	})
+	status, body = getOperationHTTP(t, server.URL, "/execution/operation?kind=pty", key, "other-token")
+	require.Equal(t, http.StatusNotFound, status, string(body))
+	require.Contains(t, string(body), "operation_not_found")
+	status, _ = getOperationHTTP(t, server.URL, "/execution/operation?kind=pty", key, "legacy-token")
+	require.Equal(t, http.StatusUnauthorized, status)
+
+	binding.Apply(owner)
+	status, body = getOperationHTTP(t, server.URL, "/execution/operation?kind=pty", key, "test-token")
+	require.Equal(t, op.ID, decodeOperation(t, status, body).ID)
 }
 
 func TestOperationHTTP(t *testing.T) {

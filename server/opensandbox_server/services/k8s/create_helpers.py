@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 # 
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -106,10 +106,9 @@ def _build_create_workload_context(
     if egress_env and not request.network_policy:
         dropped_keys = sorted(egress_env.keys())
         logger.warning(
-            "Sandbox %s has OPENSANDBOX_EGRESS_ env vars %s but no networkPolicy; "
-            "these variables will be ignored because no egress sidecar is created",
-            sandbox_id,
-            dropped_keys,
+            f"Sandbox {sandbox_id} has OPENSANDBOX_EGRESS_ env vars {dropped_keys} "
+            "but no networkPolicy; these variables will be ignored because no "
+            "egress sidecar is created"
         )
         egress_env = {}
 

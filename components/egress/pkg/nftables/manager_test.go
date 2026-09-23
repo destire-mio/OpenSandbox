@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -97,8 +97,10 @@ func TestApplyStatic_AllowsRedirectedDNSBeforeAlwaysDeny(t *testing.T) {
 	denyRuleIndex := strings.Index(rendered, denyRule)
 	require.NotEqual(t, -1, denyRuleIndex, "expected rendered ruleset to contain %q", denyRule)
 	for _, dnsRule := range []string{
+		"add rule inet opensandbox egress icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept",
 		"add rule inet opensandbox egress ip daddr 127.0.0.1 udp dport 15353 accept",
 		"add rule inet opensandbox egress ip daddr 127.0.0.1 tcp dport 15353 accept",
+		"add rule inet opensandbox egress ip6 daddr ::1 accept",
 	} {
 		dnsRuleIndex := strings.Index(rendered, dnsRule)
 		require.NotEqual(t, -1, dnsRuleIndex, "expected rendered ruleset to contain %q", dnsRule)

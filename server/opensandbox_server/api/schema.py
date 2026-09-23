@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,7 +22,7 @@ for request/response validation and serialization.
 from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, RootModel, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, RootModel, model_validator
 
 from opensandbox_server.constants import OPENSANDBOX_LIFECYCLE
 
@@ -453,6 +453,11 @@ class CreateSandboxRequest(BaseModel):
     """
     Request to create a new sandbox from either a container image or a snapshot.
     """
+
+    # Internal routing hint: set by snapshot restore resolution to the backend
+    # that produced the snapshot (e.g. "fsb"); never serialized on the wire.
+    _resolved_snapshot_backend: Optional[str] = PrivateAttr(default=None)
+
     image: Optional[ImageSpec] = Field(
         None,
         description="Container image specification for the sandbox",
@@ -645,6 +650,11 @@ class CreateSandboxRequest(BaseModel):
 
     class Config:
         populate_by_name = True
+
+    @property
+    def resolved_snapshot_backend(self) -> Optional[str]:
+        """Backend that produced the snapshot being restored, if resolved."""
+        return self._resolved_snapshot_backend
 
 
 class CreateSandboxResponse(BaseModel):
@@ -1172,6 +1182,17 @@ class CreateFsbTemplateRequest(BaseModel):
         min_length=1,
         description="Guest business command (argv); empty defaults to ['tail', '-f', '/dev/null'].",
     )
+    env: Optional[Dict[str, str]] = Field(
+        None,
+        description=(
+            "Environment variables baked into the golden image (injected as "
+            "/etc/sandbox-init.env in the guest; literal values only). The "
+            "source image's own OCI Config.Env is inherited like a container "
+            "runtime would; an env with the same name here overrides the "
+            "inherited value. Names must be valid shell variable names "
+            "([A-Za-z_][A-Za-z0-9_]*)."
+        ),
+    )
     metadata: Optional[Dict[str, str]] = Field(
         None,
         description="Custom key-value metadata for management, filtering, and tagging",
@@ -1226,6 +1247,9 @@ class FsbTemplate(BaseModel):
     image: str = Field(..., description="Source OCI image reference")
     resource_limits: Optional[ResourceLimits] = Field(None, alias="resourceLimits")
     entrypoint: Optional[List[str]] = Field(None, description="Guest business command (argv)")
+    env: Optional[Dict[str, str]] = Field(
+        None, description="Environment variables baked into the golden image"
+    )
     metadata: Optional[Dict[str, str]] = Field(None, description="Custom metadata from the creation request")
     readiness: Optional[FsbTemplateReadiness] = Field(None, description="Build-side readiness gate")
     publish: str = Field(..., description="S3-compatible publish target")

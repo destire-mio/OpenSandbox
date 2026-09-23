@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -130,7 +130,6 @@ func TestSessionState_JSONRoundtrip(t *testing.T) {
 		}
 	}
 
-	// Round-trip: unmarshalling produces identical structure.
 	var back SessionState
 	if err := json.Unmarshal(b, &back); err != nil {
 		t.Fatal(err)

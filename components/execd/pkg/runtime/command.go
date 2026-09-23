@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -115,10 +115,8 @@ func buildCredential(uid, gid *uint32) (*syscall.Credential, error) {
 	cred := &syscall.Credential{}
 	if uid != nil {
 		cred.Uid = *uid
-		// Load user info to get primary GID and supplemental groups
 		u, err := user.LookupId(strconv.FormatUint(uint64(*uid), 10))
 		if err == nil {
-			// Set primary GID if not explicitly provided
 			if gid == nil {
 				primaryGid, err := strconv.ParseUint(u.Gid, 10, 32)
 				if err == nil {
@@ -126,7 +124,6 @@ func buildCredential(uid, gid *uint32) (*syscall.Credential, error) {
 				}
 			}
 
-			// Load supplemental groups
 			gids, err := u.GroupIds()
 			if err == nil {
 				for _, g := range gids {
@@ -139,7 +136,6 @@ func buildCredential(uid, gid *uint32) (*syscall.Credential, error) {
 		}
 	}
 
-	// Override Gid if explicitly provided
 	if gid != nil {
 		cred.Gid = *gid
 	}
@@ -241,7 +237,6 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		return fmt.Errorf("resolve request cwd %s: %w", request.Cwd, err)
 	}
 
-	// Configure credentials and process group
 	cred, err := buildCredential(request.Uid, request.Gid)
 	if err != nil {
 		return fmt.Errorf("failed to build credential: %w", err)
@@ -398,7 +393,6 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 		return fmt.Errorf("resolve cwd: %w", err)
 	}
 
-	// Configure credentials and process group
 	cred, err := buildCredential(request.Uid, request.Gid)
 	if err != nil {
 		cancel()

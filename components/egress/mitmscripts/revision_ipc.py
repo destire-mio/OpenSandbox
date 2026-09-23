@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,8 +14,10 @@
 
 """Authenticated Unix IPC endpoint for the OSEP-0023 revision receiver.
 
-The live addon does not import this module yet. Its future owner must provide a
-fresh token per proxy process and fence readiness and remote teardown.
+The live addon imports this module only when its launcher hands off a complete
+internal session; current egress profiles do not supply one. The future session
+owner must provide a fresh token per proxy process and fence readiness and
+remote teardown.
 """
 
 from __future__ import annotations

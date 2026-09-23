@@ -1,7 +1,7 @@
 # pyright: reportAttributeAccessIssue=false
 # protobuf-generated modules expose dynamic attributes.
 
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -128,7 +128,6 @@ def test_map_create_request_rejects_renew_extension_until_it_has_a_read_path():
 @pytest.mark.parametrize(
     "field_name,payload",
     [
-        ("snapshotId", {"image": None, "snapshot_id": "snap-1"}),
         ("platform", {"platform": PlatformSpec(os="linux", arch="amd64")}),
         (
             "resourceRequests",

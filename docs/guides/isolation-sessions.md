@@ -38,8 +38,9 @@ Component versions needed for the features covered by this guide:
   recommended** for `binds`, `List sessions`, `uid_mode: "userns"`, and the
   default writable allowlist (`/workspace`, `/mnt`, `/media`, `/data`)
 - `opensandbox-server` >= 0.2.1 — the server injects `CAP_SYS_ADMIN`,
-  `apparmor=unconfined`, and the tmpfs mount required by `bwrap` when the
-  execd image declares `bootstrap.execd.isolation`
+  unconfined AppArmor, seccomp, and protected-system-path settings, and the
+  tmpfs mount required by `bwrap` when the execd image declares
+  `bootstrap.execd.isolation`
 - Python SDK >= 0.1.14 (`isolation.run_once` / `isolation.session` context
   manager); >= 0.1.13 for the generated isolation client only
 - JavaScript / TypeScript SDK >= 0.1.10 (`isolation.runOnce` /
@@ -503,8 +504,7 @@ still fail at runtime on such hosts. If you rely on `workspace.mode:
 
 ## Limitations
 
-- **`diff` / `commit` are Phase 2 stubs**, currently return `503`. Tracked
-  in [OSEP-0013](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0013-isolated-execution-api.md).
+- **`diff` / `commit` are Phase 2 stubs**, currently return `503`.
 - **No hardware-level guarantee.** Namespaces + seccomp only; pair with a
   secure runtime for kernel-exploit defense.
 - **Linux only.** Non-Linux builds return `available: false`.
@@ -515,7 +515,6 @@ still fail at runtime on such hosts. If you rely on `workspace.mode:
 
 ## See Also
 
-- [OSEP-0013 — Isolated Execution API](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0013-isolated-execution-api.md)
-- [execd](/components/execd)
+- [execd](/architecture/data-plane/execd)
 - [Secure Container Runtime](/guides/secure-container)
 - [execd OpenAPI spec](/api/)

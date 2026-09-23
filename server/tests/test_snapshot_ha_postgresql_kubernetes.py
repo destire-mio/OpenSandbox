@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -86,7 +86,6 @@ def _config(dsn: str) -> AppConfig:
         runtime=RuntimeConfig(type="kubernetes", execd_image="opensandbox/execd:test"),
         kubernetes=KubernetesRuntimeConfig(
             namespace="default",
-            snapshot_create_timeout_seconds=1,
         ),
         store=StoreConfig(
             type="postgresql",

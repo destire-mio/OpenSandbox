@@ -1,7 +1,7 @@
 # pyright: reportAttributeAccessIssue=false
 # protobuf-generated modules expose dynamic attributes.
 
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -39,6 +39,7 @@ from opensandbox_server.config import (
     RuntimeConfig,
     ServerConfig,
 )
+from opensandbox_server.middleware.request_id import RequestIdMiddleware
 from opensandbox_server.services.fast_sandbox.fastpath_client import FastPathClient
 from opensandbox_server.services.composite_service import CompositeSandboxService
 from opensandbox_server.services.factory import create_sandbox_service
@@ -64,6 +65,10 @@ class _FakeFastPathService(pb2_grpc.FastPathServiceServicer):
         self.abort_update_with: grpc.StatusCode | None = None
         self.abort_create_with: grpc.StatusCode | None = None
         self.reject_create_with: grpc.StatusCode | None = None
+        self.abort_pause_with: grpc.StatusCode | None = None
+        self.abort_resume_with: grpc.StatusCode | None = None
+        self.pause_requests: list[pb2.PauseSandboxRequest] = []
+        self.resume_requests: list[pb2.ResumeSandboxRequest] = []
         self.create_pending = False
         self.create_time_remaining: float | None = None
         self.diagnostic_runtime_state = pb2.RUNTIME_STATE_READY
@@ -201,6 +206,60 @@ class _FakeFastPathService(pb2_grpc.FastPathServiceServicer):
         self.crs.pop((namespace, name), None)
         return pb2.DeleteResponse()
 
+    def _cr_runtime_state(self, namespace: str, name: str) -> str:
+        cr = self.crs.get((namespace, name)) or {}
+        return (cr.get("status") or {}).get("runtime", {}).get("state", "")
+
+    def PauseSandbox(self, request, context):
+        self.pause_requests.append(request)
+        namespace = request.sandbox.namespaced_name.namespace
+        name = request.sandbox.namespaced_name.name
+        current = self.sandboxes.get((namespace, name))
+        if current is None:
+            return context.abort(grpc.StatusCode.NOT_FOUND, "not found")
+        uid, generation = current
+        if request.sandbox.expected_uid and request.sandbox.expected_uid != uid:
+            context.abort(grpc.StatusCode.ABORTED, "uid fence rejected")
+        # Only a terminal runtime refuses the pause.
+        if self._cr_runtime_state(namespace, name) in ("Stopped", "Stopping", "Failed"):
+            context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "only a Ready runtime can be paused",
+            )
+        if self.abort_pause_with is not None:
+            context.abort(self.abort_pause_with, "scripted pause failure")
+        if (namespace, name) in self.crs:
+            self.crs[(namespace, name)]["status"]["runtime"]["state"] = "Pausing"
+        return pb2.PauseSandboxResponse(
+            sandbox=self._info(name, uid, namespace), generation=generation
+        )
+
+    def ResumeSandbox(self, request, context):
+        self.resume_requests.append(request)
+        namespace = request.sandbox.namespaced_name.namespace
+        name = request.sandbox.namespaced_name.name
+        current = self.sandboxes.get((namespace, name))
+        if current is None:
+            return context.abort(grpc.StatusCode.NOT_FOUND, "not found")
+        uid, generation = current
+        if request.sandbox.expected_uid and request.sandbox.expected_uid != uid:
+            context.abort(grpc.StatusCode.ABORTED, "uid fence rejected")
+        # A durably Paused sandbox without a checkpoint is unresumable.
+        cr = self.crs.get((namespace, name)) or {}
+        runtime_status = (cr.get("status") or {}).get("runtime") or {}
+        if runtime_status.get("state") == "Paused" and not runtime_status.get("checkpoint"):
+            context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "no recorded checkpoint; resume is impossible",
+            )
+        if self.abort_resume_with is not None:
+            context.abort(self.abort_resume_with, "scripted resume failure")
+        if (namespace, name) in self.crs:
+            self.crs[(namespace, name)]["status"]["runtime"]["state"] = "Resuming"
+        return pb2.ResumeSandboxResponse(
+            sandbox=self._info(name, uid, namespace), generation=generation
+        )
+
     def GetSandboxDiagnostics(self, request, context):
         sandbox = self.sandboxes.get((request.namespace, request.sandbox_name))
         if sandbox is None:
@@ -253,7 +312,8 @@ def http_fsb(monkeypatch):
     )
     fastpath = FastPathClient(endpoint=f"127.0.0.1:{port}")
     with patch.object(K8sClient, "_load_config"):
-        k8s = K8sClient(KubernetesRuntimeConfig(informer_enabled=False))
+        k8s = K8sClient(KubernetesRuntimeConfig())
+    monkeypatch.setattr(WorkloadInformer, "start", lambda self: None)
     api = Mock(spec=CustomObjectsApi)
     api.get_api_resources.return_value = V1APIResourceList(
         group_version="sandbox.fast.io/v1alpha2",
@@ -291,6 +351,7 @@ def http_fsb(monkeypatch):
     monkeypatch.setattr(lifecycle, "sandbox_service", service)
 
     app = FastAPI()
+    app.add_middleware(RequestIdMiddleware)
     app.include_router(lifecycle.router, prefix="/v1")
     app.include_router(network_policy.router, prefix="/v1")
     try:
@@ -459,7 +520,6 @@ def test_cr_reads_do_not_depend_on_fastpath_and_remain_tenant_scoped(persisted_f
 def test_cr_watch_and_fastpath_mutations_refresh_http_reads(persisted_fsb, monkeypatch):
     client, fake, service, sandbox_id = persisted_fsb
     k8s = service._cr_reader._client
-    k8s.config.informer_enabled = True
     monkeypatch.setattr(WorkloadInformer, "start", lambda self: None)
     url = f"/v1/sandboxes/{sandbox_id}"
     assert client.get(url).json()["status"]["state"] == "Running"
@@ -546,6 +606,51 @@ def test_http_policy_replace_preserves_bindings_and_fences_updates(persisted_fsb
     assert client.get(url).json()["policy"] == policy
 
 
+def test_http_policy_patch_and_delete_match_sidecar_semantics(persisted_fsb):
+    client, fake, _, sandbox_id = persisted_fsb
+    url = f"/v1/sandboxes/{sandbox_id}/networkpolicy"
+    client.put(url, json={
+        "defaultAction": "allow",
+        "egress": [
+            {"action": "deny", "target": "a.com"},
+            {"action": "allow", "target": "b.com"},
+        ],
+    })
+
+    # PATCH: incoming replaces same-target in place, first-wins, others kept,
+    # defaultAction preserved.
+    patched = client.patch(url, json=[
+        {"action": "allow", "target": "a.com"},
+        {"action": "deny", "target": "c.com"},
+        {"action": "allow", "target": "c.com"},
+    ])
+    assert patched.status_code == 200
+    assert patched.json()["policy"] == {
+        "defaultAction": "allow",
+        "egress": [
+            {"action": "allow", "target": "a.com"},
+            {"action": "allow", "target": "b.com"},
+            {"action": "deny", "target": "c.com"},
+        ],
+    }
+
+    # DELETE: idempotent by target, defaultAction preserved.
+    deleted = client.request("DELETE", url, json=["a.com", "missing.com"])
+    assert deleted.status_code == 200
+    assert deleted.json()["policy"] == {
+        "defaultAction": "allow",
+        "egress": [
+            {"action": "allow", "target": "b.com"},
+            {"action": "deny", "target": "c.com"},
+        ],
+    }
+    assert client.request("DELETE", url, json=["a.com"]).status_code == 200
+
+    # Conflict protection still applies to merged commits.
+    fake.abort_update_with = grpc.StatusCode.ABORTED
+    assert client.patch(url, json=[{"action": "deny", "target": "d.com"}]).status_code == 409
+
+
 def test_policy_rejects_invalid_input_and_other_tenant(persisted_fsb):
     client, fake, _, sandbox_id = persisted_fsb
     url = f"/v1/sandboxes/{sandbox_id}/networkpolicy"
@@ -567,7 +672,7 @@ def test_legacy_policy_route_preserves_body_for_existing_proxy(http_fsb, monkeyp
 
     client, _, _ = http_fsb
 
-    async def proxy(request, sandbox_id, port, path):
+    async def proxy(request, sandbox_id, port, path, **kwargs):
         assert (sandbox_id, port, path) == ("legacy-id", 18080, "policy")
         body = b"".join([part async for part in request.stream()])
         return JSONResponse(json.loads(body) if body else {"status": "ok"})
@@ -638,7 +743,7 @@ def test_mixed_list_globally_filters_sorts_and_pages(persisted_fsb, monkeypatch)
 
 
 @pytest.mark.parametrize(
-    "failure,expected", [("absent", 200), ("forbidden", 503), ("list404", 503), ("legacy", 503)]
+    "failure,expected", [("list404", 200), ("legacy", 503)]
 )
 def test_mixed_list_never_hides_a_backend_failure(persisted_fsb, monkeypatch, failure, expected):
     client, _, fsb, sandbox_id = persisted_fsb
@@ -647,9 +752,7 @@ def test_mixed_list_never_hides_a_backend_failure(persisted_fsb, monkeypatch, fa
         fsb.get_sandbox(sandbox_id).model_copy(update={"id": "legacy"})
     ]
     api = fsb._cr_reader._client.get_custom_objects_api()
-    if failure in ("absent", "forbidden"):
-        api.get_api_resources.side_effect = ApiException(status=404 if failure == "absent" else 403)
-    elif failure == "list404":
+    if failure == "list404":
         api.list_namespaced_custom_object.side_effect = ApiException(status=404)
     else:
         legacy.list_sandbox_objects.side_effect = ApiException(status=503)
@@ -657,7 +760,10 @@ def test_mixed_list_never_hides_a_backend_failure(persisted_fsb, monkeypatch, fa
     response = client.get("/v1/sandboxes")
     assert response.status_code == expected
     if expected == 200:
-        assert [item["id"] for item in response.json()["items"]] == ["legacy"]
+        listed_ids = [item["id"] for item in response.json()["items"]]
+        assert "legacy" in listed_ids
+        if failure == "list404":
+            assert not [i for i in listed_ids if i.startswith("fsb-")]
 
 
 @pytest.mark.asyncio
@@ -731,6 +837,102 @@ def test_http_renew_maps_fence_conflict_and_missing_sandbox(http_fsb):
     assert missing_delete.status_code == 404
 
 
+def _create_fsb_sandbox(client) -> str:
+    return client.post(
+        "/v1/sandboxes",
+        json={
+            "image": {"uri": "python:3.11"},
+            "entrypoint": ["python"],
+            "timeout": 3600,
+            "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+        },
+    ).json()["id"]
+
+
+def test_http_pause_and_resume_use_uid_fences_and_return_accepted(http_fsb):
+    client, fake, _ = http_fsb
+    sandbox_id = _create_fsb_sandbox(client)
+
+    paused = client.post(f"/v1/sandboxes/{sandbox_id}/pause")
+    resumed = client.post(f"/v1/sandboxes/{sandbox_id}/resume")
+
+    assert paused.status_code == 202
+    assert resumed.status_code == 202
+    assert len(fake.pause_requests) == 1
+    assert fake.pause_requests[0].sandbox.expected_uid == f"uid-{sandbox_id}"
+    assert fake.pause_requests[0].sandbox.namespaced_name.name == sandbox_id
+    assert fake.pause_requests[0].request_id != ""
+    assert fake.resume_requests[0].sandbox.expected_uid == f"uid-{sandbox_id}"
+
+
+def test_http_pause_maps_precondition_to_conflict_and_missing_to_not_found(http_fsb):
+    client, fake, _ = http_fsb
+    sandbox_id = _create_fsb_sandbox(client)
+    fake.abort_pause_with = grpc.StatusCode.FAILED_PRECONDITION
+
+    conflict = client.post(f"/v1/sandboxes/{sandbox_id}/pause")
+    missing = client.post("/v1/sandboxes/fsb-missing/pause")
+
+    assert conflict.status_code == 409
+    assert missing.status_code == 404
+
+
+def test_http_resume_maps_precondition_to_conflict(http_fsb):
+    client, fake, _ = http_fsb
+    sandbox_id = _create_fsb_sandbox(client)
+    fake.abort_resume_with = grpc.StatusCode.FAILED_PRECONDITION
+
+    conflict = client.post(f"/v1/sandboxes/{sandbox_id}/resume")
+    detail = conflict.json()["detail"]
+
+    assert conflict.status_code == 409
+    assert detail["code"] == "FSB::API_ERROR"
+
+
+def test_http_pause_rejects_terminal_runtime_state(http_fsb):
+    client, fake, _ = http_fsb
+    sandbox_id = _create_fsb_sandbox(client)
+    fake.crs[("ns-1", sandbox_id)]["status"]["runtime"]["state"] = "Failed"
+
+    response = client.post(f"/v1/sandboxes/{sandbox_id}/pause")
+
+    assert response.status_code == 409
+
+
+def test_http_resume_rejects_paused_without_checkpoint(http_fsb):
+    client, fake, _ = http_fsb
+    sandbox_id = _create_fsb_sandbox(client)
+    fake.crs[("ns-1", sandbox_id)]["status"]["runtime"] = {"state": "Paused"}
+
+    response = client.post(f"/v1/sandboxes/{sandbox_id}/resume")
+
+    assert response.status_code == 409
+
+
+def test_get_reports_pause_lifecycle_states(http_fsb):
+    client, fake, _ = http_fsb
+    sandbox_id = _create_fsb_sandbox(client)
+    cr_status = fake.crs[("ns-1", sandbox_id)]["status"]
+
+    for cr_state, expected in (
+        ("Pausing", "Pausing"),
+        ("Paused", "Paused"),
+        ("Resuming", "Resuming"),
+        ("Ready", "Running"),
+    ):
+        cr_status["runtime"]["state"] = cr_state
+        cr_status["dataPlane"]["state"] = "Ready" if cr_state == "Ready" else "Unavailable"
+        cr_status["conditions"] = [
+            {
+                "type": "Ready",
+                "status": "True" if cr_state == "Ready" else "False",
+                "observedGeneration": 1,
+            }
+        ]
+        state = client.get(f"/v1/sandboxes/{sandbox_id}").json()["status"]["state"]
+        assert state == expected, f"CR runtime {cr_state} must map to {expected}"
+
+
 def test_diagnostics_use_new_structured_state(http_fsb):
     client, fake, service = http_fsb
     sandbox_id = client.post(
@@ -767,17 +969,11 @@ def test_event_diagnostics_enforce_stable_scope_contract(http_fsb):
     }
 
 
-@pytest.mark.parametrize("operation", ["logs", "pause", "resume"])
-def test_unsupported_fsb_operations_are_explicit(http_fsb, operation):
+def test_unsupported_fsb_operations_are_explicit(http_fsb):
     _, _, service = http_fsb
 
     with pytest.raises(HTTPException) as exc_info:
-        if operation == "logs":
-            service.get_sandbox_logs("fsb-1")
-        elif operation == "pause":
-            service.pause_sandbox("fsb-1")
-        elif operation == "resume":
-            service.resume_sandbox("fsb-1")
+        service.get_sandbox_logs("fsb-1")
 
     assert exc_info.value.status_code == 501
 

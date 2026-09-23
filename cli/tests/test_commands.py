@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -648,9 +648,9 @@ class TestSandboxMetrics:
         class _FakeResponse:
             def __init__(self) -> None:
                 self.lines = [
-                    'data: {"cpu_count": 2, "cpu_used_percentage": 12.5, "memory_total_in_mib": 1024, "memory_used_in_mib": 256, "timestamp": 1710000000000}',
+                    'data: {"cpu_count": 2, "cpu_used_pct": 12.5, "mem_total_mib": 1024, "mem_used_mib": 256, "timestamp": 1710000000000}',
                     "",
-                    'data: {"cpu_count": 2, "cpu_used_percentage": 18.0, "memory_total_in_mib": 1024, "memory_used_in_mib": 300, "timestamp": 1710000001000}',
+                    'data: {"cpu_count": 2, "cpu_used_pct": 18.0, "mem_total_mib": 1024, "mem_used_mib": 300, "timestamp": 1710000001000}',
                 ]
 
             def __enter__(self) -> _FakeResponse:
@@ -683,9 +683,9 @@ class TestSandboxMetrics:
         class _FakeResponse:
             def __init__(self) -> None:
                 self.lines = [
-                    'data: {"cpu_count": 2, "cpu_used_percentage": 12.5, "memory_total_in_mib": 1024, "memory_used_in_mib": 256, "timestamp": 1710000000000}',
+                    'data: {"cpu_count": 2, "cpu_used_pct": 12.5, "mem_total_mib": 1024, "mem_used_mib": 256, "timestamp": 1710000000000}',
                     'data: {"error": "failed to get CPU percent"}',
-                    'data: {"cpu_count": 2, "cpu_used_percentage": 18.0, "memory_total_in_mib": 1024, "memory_used_in_mib": 300, "timestamp": 1710000001000}',
+                    'data: {"cpu_count": 2, "cpu_used_pct": 18.0, "mem_total_mib": 1024, "mem_used_mib": 300, "timestamp": 1710000001000}',
                 ]
 
             def __enter__(self) -> _FakeResponse:
@@ -837,6 +837,68 @@ class TestFileTransfer:
         assert result.exit_code == 0
         assert local_path.read_bytes() == b"hello"
         mock_sb.files.read_bytes_stream.assert_called_once_with("/tmp/download.txt")
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX device file")
+    def test_download_to_null_device(self, runner: CliRunner) -> None:
+        mock_sb = MagicMock()
+        mock_sb.files.read_bytes_stream.return_value = iter([b"\x00\xff", b"data"])
+
+        result = _invoke(
+            runner,
+            ["file", "download", "sb-1", "/tmp/data.bin", os.devnull],
+            sandbox=mock_sb,
+        )
+
+        assert result.exit_code == 0, result.output
+        assert stat.S_ISCHR(Path(os.devnull).stat().st_mode)
+        mock_sb.files.read_bytes_stream.assert_called_once_with("/tmp/data.bin")
+        mock_sb.close.assert_called_once()
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX named pipes and symlinks")
+    @pytest.mark.parametrize("symlink", [False, True])
+    @pytest.mark.parametrize("failure", [None, "disconnect", "interrupt"])
+    def test_download_streams_to_fifo_without_replacing_it(
+        self, runner: CliRunner, tmp_path: Path, symlink: bool, failure: str | None
+    ) -> None:
+        fifo = tmp_path / "download.pipe"
+        os.mkfifo(fifo)
+        original_inode = fifo.stat().st_ino
+        destination = fifo
+        if symlink:
+            destination = tmp_path / "download-link"
+            destination.symlink_to(fifo.name)
+
+        def stream():
+            yield b"\x00\xfffirst"
+            if failure == "disconnect":
+                raise ConnectionError("Download disconnected")
+            if failure == "interrupt":
+                raise KeyboardInterrupt
+            yield b"second"
+
+        mock_sb = MagicMock()
+        mock_sb.files.read_bytes_stream.return_value = stream()
+        # Keep a reader connected so opening the FIFO for writing cannot block.
+        reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            result = _invoke(
+                runner,
+                ["file", "download", "sb-1", "/tmp/data.bin", str(destination)],
+                sandbox=mock_sb,
+            )
+            received = os.read(reader, 1024)
+        finally:
+            os.close(reader)
+
+        assert (result.exit_code == 0) == (failure is None), result.output
+        assert ("Downloaded:" in result.output) == (failure is None)
+        assert received == b"\x00\xfffirst" + (b"second" if failure is None else b"")
+        assert stat.S_ISFIFO(fifo.stat().st_mode)
+        assert fifo.stat().st_ino == original_inode
+        assert set(tmp_path.iterdir()) == {fifo, destination}
+        if symlink:
+            assert destination.is_symlink()
+        mock_sb.close.assert_called_once()
 
     @pytest.mark.parametrize("existing", [False, True])
     @pytest.mark.parametrize("failure", ["not_found", "disconnect", "interrupt"])
@@ -1135,6 +1197,64 @@ class TestCommandSeparators:
         mock_sb.commands.run.assert_called_once()
         assert mock_sb.commands.run.call_args.args[0] == "sh -lc 'echo ready'"
 
+    def test_command_run_argv_flag_passes_native_argv_after_separator(self, runner: CliRunner) -> None:
+        mock_sb = MagicMock()
+        execution = MagicMock()
+        execution.error = None
+        mock_sb.commands.run.return_value = execution
+
+        result = _invoke(
+            runner,
+            ["command", "run", "sb-1", "--argv", "--", "sh", "-lc", "echo ready"],
+            sandbox=mock_sb,
+            output_format="raw",
+        )
+
+        assert result.exit_code == 0
+        mock_sb.commands.run.assert_called_once()
+        assert mock_sb.commands.run.call_args.args[0] == ["sh", "-lc", "echo ready"]
+
+    def test_command_run_argv_flag_preserves_literal_arguments(self, runner: CliRunner) -> None:
+        # With --argv the trailing arguments must reach the process verbatim:
+        # literal "$HOME", embedded space, single quote, and an empty string,
+        # with no shell quoting or expansion in between.
+        mock_sb = MagicMock()
+        execution = MagicMock()
+        execution.error = None
+        mock_sb.commands.run.return_value = execution
+
+        result = _invoke(
+            runner,
+            [
+                "command",
+                "run",
+                "sb-1",
+                "--argv",
+                "--",
+                "python3",
+                "-c",
+                "import sys; print(sys.argv[1:])",
+                "a b",
+                "$HOME",
+                "x'y",
+                "",
+            ],
+            sandbox=mock_sb,
+            output_format="raw",
+        )
+
+        assert result.exit_code == 0
+        mock_sb.commands.run.assert_called_once()
+        assert mock_sb.commands.run.call_args.args[0] == [
+            "python3",
+            "-c",
+            "import sys; print(sys.argv[1:])",
+            "a b",
+            "$HOME",
+            "x'y",
+            "",
+        ]
+
     def test_command_run_help_mentions_separator_rule(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["command", "run", "--help"])
         assert result.exit_code == 0
@@ -1393,6 +1513,26 @@ class TestCommandRun:
         data = json.loads(result.output)
         assert data["execution_id"] == "exec-123"
         assert data["mode"] == "background"
+        mock_sb.commands.run.assert_called_once()
+        assert mock_sb.commands.run.call_args.args[0] == "echo hello"
+
+    def test_background_run_argv_flag_passes_native_argv(self, runner: CliRunner) -> None:
+        mock_sb = MagicMock()
+        mock_execution = MagicMock()
+        mock_execution.id = "exec-123"
+        mock_sb.commands.run.return_value = mock_execution
+
+        result = _invoke(
+            runner,
+            ["command", "run", "sb-1", "-d", "--argv", "echo", "hello", "-o", "json"],
+            sandbox=mock_sb,
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["execution_id"] == "exec-123"
+        assert data["mode"] == "background"
+        mock_sb.commands.run.assert_called_once()
+        assert mock_sb.commands.run.call_args.args[0] == ["echo", "hello"]
 
     def test_foreground_run_rejects_json_output(self, runner: CliRunner) -> None:
         result = _invoke(

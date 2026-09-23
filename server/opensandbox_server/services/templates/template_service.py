@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -72,6 +73,10 @@ DEFAULT_ENTRYPOINT = ["tail", "-f", "/dev/null"]
 # silently dropped by the CRD mapping.
 TEMPLATE_RESOURCE_KEYS = frozenset({"cpu", "memory", "disk"})
 
+# Same shape the SandboxTemplate builder enforces at build time; validating
+# here turns a would-be failed build into a 400 at template creation.
+_VALID_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 _TEMPLATE_NOT_FOUND = {
     "code": SandboxErrorCodes.FSB_TEMPLATE_NOT_FOUND,
     "message": "Template not found.",
@@ -112,7 +117,7 @@ class FastSandboxTemplateService:
         try:
             namespaces.update(self._repo().namespaces())
         except Exception as exc:  # noqa: BLE001 - catalog may be empty/unavailable
-            logger.warning("Template catalog scan failed while starting watches: %s", exc)
+            logger.warning(f"Template catalog scan failed while starting watches: {exc}")
         for namespace in sorted(namespaces):
             self._ensure_namespace_watch(namespace)
 
@@ -124,7 +129,7 @@ class FastSandboxTemplateService:
         )
         if informer is None:
             logger.warning(
-                "Template status watches disabled (informer_enabled=false); "
+                f"Template status watch failed to start for namespace {namespace!r}; "
                 "rows converge on reads only"
             )
             return
@@ -197,6 +202,22 @@ class FastSandboxTemplateService:
                         ),
                     },
                 )
+        if request.env:
+            invalid_env_names = [
+                name for name in request.env if not _VALID_ENV_NAME.match(name)
+            ]
+            if invalid_env_names:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": SandboxErrorCodes.INVALID_PARAMETER,
+                        "message": (
+                            f"Invalid env names for templates: "
+                            f"{', '.join(sorted(invalid_env_names))}; names must "
+                            f"match [A-Za-z_][A-Za-z0-9_]*."
+                        ),
+                    },
+                )
         namespace = self._resolve_namespace()
         template_id = f"tpl-{uuid.uuid4()}"
         now = datetime.now(timezone.utc)
@@ -206,6 +227,7 @@ class FastSandboxTemplateService:
                 request.resource_limits.root if request.resource_limits is not None else None
             ),
             "entrypoint": list(request.entrypoint) if request.entrypoint else None,
+            "env": dict(request.env) if request.env else None,
             "readiness": (
                 request.readiness.model_dump(exclude_none=True, by_alias=True)
                 if request.readiness is not None
@@ -249,7 +271,7 @@ class FastSandboxTemplateService:
                         "message": f"SandboxTemplate rejected: {exc.reason}",
                     },
                 ) from exc
-            logger.warning("SandboxTemplate CRD create failed: %s", exc)
+            logger.warning(f"SandboxTemplate CRD create failed: {exc}")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail={
@@ -261,7 +283,7 @@ class FastSandboxTemplateService:
             # Transport failures (connection refused, DNS, timeout) are not
             # ApiException; the catalog row must roll back all the same.
             self._repo().delete(template_id, namespace)
-            logger.warning("SandboxTemplate CRD create failed: %s", exc)
+            logger.warning(f"SandboxTemplate CRD create failed: {exc}")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail={
@@ -311,7 +333,7 @@ class FastSandboxTemplateService:
             )
         except ApiException as exc:
             if exc.status != 404:
-                logger.warning("SandboxTemplate CRD delete failed: %s", exc)
+                logger.warning(f"SandboxTemplate CRD delete failed: {exc}")
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail={
@@ -372,6 +394,9 @@ class FastSandboxTemplateService:
                 "publishSecretRef": {"name": self._k8s_config.template_s3_publish_secret},
             },
         }
+        env = record.spec.get("env") or {}
+        if env:
+            spec["envs"] = [{"name": name, "value": value} for name, value in env.items()]
         # The CRD requires the readiness object itself (structural
         # defaulting fills warmupSeconds=60); always emit it, empty when the
         # request carried no readiness gate.
@@ -428,7 +453,7 @@ class FastSandboxTemplateService:
                 GROUP, VERSION, namespace, PLURAL, ignore_not_found=True
             ) or []
         except Exception as exc:  # noqa: BLE001 - reads converge on the next request
-            logger.warning("SandboxTemplate CR list failed during sync: %s", exc)
+            logger.warning(f"SandboxTemplate CR list failed during sync: {exc}")
             return
         by_name = {crd.get("metadata", {}).get("name", ""): crd for crd in crds}
         for record in records:
@@ -472,7 +497,7 @@ class FastSandboxTemplateService:
                 message=message,
             )
         except Exception as exc:  # noqa: BLE001 - reads converge on the next request
-            logger.warning("Template status persist failed: %s", exc)
+            logger.warning(f"Template status persist failed: {exc}")
 
     def _read_crd(self, namespace: str, crd_name: str) -> Optional[dict]:
         try:
@@ -480,7 +505,7 @@ class FastSandboxTemplateService:
                 GROUP, VERSION, namespace, PLURAL, crd_name
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("SandboxTemplate CR read failed: %s", exc)
+            logger.warning(f"SandboxTemplate CR read failed: {exc}")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail={
@@ -512,6 +537,7 @@ def template_to_response(record: FastSandboxTemplateRecord) -> FsbTemplate:
         image=record.source_image,
         resourceLimits=limits,  # type: ignore[arg-type]
         entrypoint=record.spec.get("entrypoint"),
+        env=record.spec.get("env"),
         metadata=record.metadata or None,
         readiness=readiness,  # type: ignore[arg-type]
         publish=record.publish,

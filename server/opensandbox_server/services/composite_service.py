@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -57,8 +57,12 @@ class CompositeSandboxService(SandboxService, ExtensionService):
     async def create_sandbox(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
         # templateId is the unambiguous fsb selector: fsb sandboxes are
         # the microVM catalog and coexist with the container-sandbox
-        # workload provider; every other create stays with it.
+        # workload provider. A snapshotId resolved to an fsb-produced
+        # artifact (restore_config.backend == "fsb") selects fsb the same
+        # way; every other create stays with it.
         if (request.template_id or "").strip():
+            return await self._fsb.create_sandbox(request)
+        if (request.snapshot_id or "").strip() and request.resolved_snapshot_backend == "fsb":
             return await self._fsb.create_sandbox(request)
         return await self._kubernetes.create_sandbox(request)
 
@@ -70,7 +74,7 @@ class CompositeSandboxService(SandboxService, ExtensionService):
         except HTTPException:
             raise
         except Exception as exc:
-            logger.warning("Cannot read complete sandbox list: %s", exc)
+            logger.warning(f"Cannot read complete sandbox list: {exc}")
             raise HTTPException(
                 503,
                 detail={
@@ -121,6 +125,12 @@ class CompositeSandboxService(SandboxService, ExtensionService):
 
     def replace_network_policy(self, sandbox_id: str, policy: NetworkPolicy) -> dict:
         return self._fsb.replace_network_policy(sandbox_id, policy)
+
+    def patch_network_policy(self, sandbox_id: str, rules: list) -> dict:
+        return self._fsb.patch_network_policy(sandbox_id, rules)
+
+    def delete_network_policy_rules(self, sandbox_id: str, targets: list) -> dict:
+        return self._fsb.delete_network_policy_rules(sandbox_id, targets)
 
     def get_sandbox_log_diagnostics(self, sandbox_id: str, scope: str) -> DiagnosticResult:
         return self._backend(sandbox_id).get_sandbox_log_diagnostics(sandbox_id, scope)

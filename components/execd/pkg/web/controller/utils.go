@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -273,17 +273,6 @@ func GetFileInfo(filePath string) (model.FileInfo, error) {
 	}
 
 	return buildFileInfo(absPath, fileInfo)
-}
-
-func SearchFileMetadata(metadata map[string]model.FileMetadata, filePath string) (string, model.FileMetadata, bool) {
-	base := filepath.Base(filePath)
-	for path, info := range metadata {
-		if filepath.Base(path) == base {
-			return path, info, true
-		}
-	}
-
-	return "", model.FileMetadata{}, false
 }
 
 type httpRange struct {

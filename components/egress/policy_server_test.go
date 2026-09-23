@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -62,6 +62,10 @@ func (s *stubNft) ApplyStatic(_ context.Context, p *policy.NetworkPolicy) error 
 }
 
 func (s *stubNft) AddResolvedDomain(_ context.Context, _ string, _ []nftables.ResolvedIP) error {
+	return nil
+}
+
+func (s *stubNft) AddUpstreamProxyIPs(_ context.Context, _ []nftables.ResolvedIP) error {
 	return nil
 }
 

@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -51,7 +51,12 @@ class EndpointCache(
 
     private val inflight = mutableMapOf<EndpointCacheKey, InflightEntry>()
 
-    private fun cloneEndpoint(ep: SandboxEndpoint) = SandboxEndpoint(endpoint = ep.endpoint, headers = ep.headers.toMap())
+    private fun cloneEndpoint(ep: SandboxEndpoint) =
+        SandboxEndpoint(
+            endpoint = ep.endpoint,
+            headers = ep.headers.toMap(),
+            origin = ep.origin,
+        )
 
     private class InflightEntry {
         @Volatile var result: SandboxEndpoint? = null

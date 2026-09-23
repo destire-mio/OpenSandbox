@@ -37,7 +37,7 @@ OpenSandbox uses these signing paths:
   Maven publish signing configuration. Download the `.asc` signature next to
   the Maven artifact and verify it with OpenPGP tooling.
 
-Release tags may also be signed with `scripts/release/create-release.sh
+Release tags may also be signed with `manifests/release/create-release.sh
 --sign-tag` when the release operator has a local git signing key configured.
 Do not rely on signed tags alone for generated deliverables; verify the
 artifact you are installing.
@@ -55,7 +55,15 @@ Expected identity values:
 
 - Repository: `opensandbox-group/OpenSandbox`
 - OIDC issuer: `https://token.actions.githubusercontent.com`
-- Source release workflow: `opensandbox-group/OpenSandbox/.github/workflows/release-generic.yml`
+
+::: warning Legacy workflow identities (pre-umbrella releases only)
+The per-target publish workflows below were removed when OpenSandbox
+moved to unified umbrella releases. They remain the verification
+identity for artifacts published before that point. New umbrella
+releases are produced by `release-umbrella.yml` and
+`release-packages.yml`.
+:::
+
 - Component image workflow: `opensandbox-group/OpenSandbox/.github/workflows/publish-components.yml`
 - Server image workflow: `opensandbox-group/OpenSandbox/.github/workflows/publish-server.yml`
 - CLI package workflow: `opensandbox-group/OpenSandbox/.github/workflows/publish-cli.yml`

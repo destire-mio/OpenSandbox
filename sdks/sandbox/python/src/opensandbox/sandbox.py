@@ -1,5 +1,5 @@
 #
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -44,11 +44,13 @@ from opensandbox.models.sandboxes import (
     NetworkPolicy,
     NetworkRule,
     PlatformSpec,
+    SandboxCreateResponse,
     SandboxEndpoint,
     SandboxImageSpec,
     SandboxInfo,
     SandboxLifecycle,
     SandboxMetrics,
+    SandboxOrigin,
     SandboxRenewResponse,
     SnapshotInfo,
     Volume,
@@ -160,6 +162,7 @@ class Sandbox:
         diagnostics_service: Diagnostics | None = None,
         isolated_service: IsolationService | None = None,
         custom_health_check: Callable[["Sandbox"], Awaitable[bool]] | None = None,
+        origin: str = SandboxOrigin.UNKNOWN,
     ) -> None:
         """
         Internal constructor for Sandbox. Use Sandbox.create() or Sandbox.connect() instead.
@@ -178,6 +181,24 @@ class Sandbox:
         )
         self._custom_health_check = custom_health_check
         self._isolated_service = isolated_service
+        self._origin = origin
+
+    @property
+    def origin(self) -> str:
+        """Origin of this sandbox (see :class:`SandboxOrigin`).
+
+        ``template`` when the sandbox runs on a fsb golden-image template:
+        set locally by ``create_from_template``, and reported by the
+        server's ``OPEN-SANDBOX-ORIGIN`` response header otherwise (also
+        honored for snapshot restores, which boot the template's published
+        artifact set). ``unknown`` for everything else.
+
+        Template-backed sandboxes route egress policy operations through
+        the lifecycle control plane
+        (``/sandboxes/{sandboxId}/networkpolicy``) instead of the
+        sandbox-side egress sidecar.
+        """
+        return self._origin
 
     @property
     def isolation(self) -> IsolationService:
@@ -217,7 +238,16 @@ class Sandbox:
     def credential_vault(self) -> CredentialVault:
         """
         Provides access to sandbox-scoped Credential Vault operations.
+
+        Raises:
+            SandboxException: for template-backed sandboxes (they have no
+                sandbox-side egress sidecar).
         """
+        if self._origin == SandboxOrigin.TEMPLATE:
+            raise SandboxException(
+                "Credential Vault is not available for template-backed "
+                "sandboxes: they have no sandbox-side egress sidecar."
+            )
         return self._egress_service
 
     @property
@@ -576,14 +606,16 @@ class Sandbox:
         logger.info(
             f"Creating sandbox with startup source: {startup_source} (timeout: {timeout_log})"
         )
-        factory = AdapterFactory(config)
-        sandbox_id: str | None = None
-        sandbox_service: Sandboxes | None = None
-        create_started = time.monotonic()
 
-        try:
-            sandbox_service = factory.create_sandbox_service()
-            response = await sandbox_service.create_sandbox(
+        return await cls._launch(
+            config=config,
+            startup_source=startup_source,
+            timeout=timeout,
+            ready_timeout=ready_timeout,
+            health_check=health_check,
+            health_check_polling_interval=health_check_polling_interval,
+            skip_health_check=skip_health_check,
+            create_call=lambda service: service.create_sandbox(
                 spec=image,
                 entrypoint=entrypoint,
                 env=env,
@@ -599,18 +631,146 @@ class Sandbox:
                 snapshot_id=snapshot_id,
                 resource_requests=resource_requests,
                 lifecycle=lifecycle,
-            )
+            ),
+        )
+
+    @classmethod
+    async def create_from_template(
+        cls,
+        template_id: str,
+        *,
+        timeout: timedelta,
+        ready_timeout: timedelta = timedelta(seconds=30),
+        metadata: dict[str, str] | None = None,
+        network_policy: NetworkPolicy | None = None,
+        extensions: dict[str, str] | None = None,
+        connection_config: ConnectionConfig | None = None,
+        health_check: Callable[["Sandbox"], Awaitable[bool]] | None = None,
+        health_check_polling_interval: timedelta = timedelta(milliseconds=200),
+        skip_health_check: bool = False,
+    ) -> "Sandbox":
+        """
+        Create a new sandbox from a ``Succeeded`` fsb template.
+
+        Template mode fixes the workload shape on the server: the entrypoint,
+        env, resources, volumes, platform and lifecycle of the sandbox come
+        from the template's golden image and cannot be overridden here. Only
+        metadata, network policy and extensions may accompany the template id,
+        and the timeout is required.
+
+        Args:
+            template_id: ID of a ``Succeeded`` fsb template (see
+                ``SandboxManager.create_template``)
+            timeout: Maximum sandbox lifetime (required in template mode)
+            ready_timeout: Total budget for endpoint publication and health checks.
+            metadata: Custom metadata for the sandbox
+            network_policy: Optional outbound network policy (egress).
+            extensions: Opaque extension parameters passed through to the server as-is.
+                Prefer namespaced keys (e.g. ``storage.id``).
+            connection_config: Connection configuration
+            health_check: Custom async health check function
+            health_check_polling_interval: Polling interval used while waiting for endpoint publication and readiness/health.
+            skip_health_check: Skip health checks; endpoint publication is still awaited.
+
+        Returns:
+            Fully configured and ready Sandbox instance
+
+        Raises:
+            InvalidArgumentException: if template_id is blank
+            SandboxException: if sandbox creation or initialization fails
+        """
+        if not template_id or not template_id.strip():
+            raise InvalidArgumentException("Template ID must be specified")
+        if not skip_health_check:
+            validate_polling_interval(health_check_polling_interval)
+
+        config = (connection_config or ConnectionConfig()).with_transport_if_missing()
+        logger.info(
+            f"Creating sandbox from template: {template_id} "
+            f"(timeout: {timeout.total_seconds()}s)"
+        )
+
+        return await cls._launch(
+            config=config,
+            startup_source=f"template:{template_id}",
+            timeout=timeout,
+            ready_timeout=ready_timeout,
+            health_check=health_check,
+            health_check_polling_interval=health_check_polling_interval,
+            skip_health_check=skip_health_check,
+            create_call=lambda service: service.create_sandbox_from_template(
+                template_id=template_id,
+                timeout=timeout,
+                metadata=metadata,
+                network_policy=network_policy,
+                extensions=extensions,
+            ),
+            origin=SandboxOrigin.TEMPLATE,
+        )
+
+    @classmethod
+    async def _launch(
+        cls,
+        *,
+        config: ConnectionConfig,
+        startup_source: str | None,
+        timeout: timedelta | None,
+        ready_timeout: timedelta,
+        health_check: Callable[["Sandbox"], Awaitable[bool]] | None,
+        health_check_polling_interval: timedelta,
+        skip_health_check: bool,
+        create_call: Callable[[Sandboxes], Awaitable[SandboxCreateResponse]],
+        origin: str = SandboxOrigin.UNKNOWN,
+    ) -> "Sandbox":
+        """Shared create flow: create remote sandbox, gather endpoints, attach, verify readiness."""
+        factory = AdapterFactory(config)
+        sandbox_id: str | None = None
+        sandbox_service: Sandboxes | None = None
+        create_started = time.monotonic()
+
+        try:
+            sandbox_service = factory.create_sandbox_service()
+            response = await create_call(sandbox_service)
             sandbox_id = response.id
 
             budget = ReadinessBudget(ready_timeout, health_check_polling_interval)
-            execd_endpoint, egress_endpoint = await _gather_fail_fast(
-                budget.endpoint(lambda: sandbox_service.get_sandbox_endpoint(
-                    response.id, DEFAULT_EXECD_PORT, config.use_server_proxy
-                )),
-                budget.endpoint(lambda: sandbox_service.get_sandbox_endpoint(
-                    response.id, DEFAULT_EGRESS_PORT, config.use_server_proxy
-                )),
-            )
+            if origin == SandboxOrigin.TEMPLATE:
+                # Template-backed (fsb) sandboxes have no sandbox-side egress
+                # sidecar: policy operations go through the lifecycle control
+                # plane.
+                execd_endpoint = await budget.endpoint(
+                    lambda: sandbox_service.get_sandbox_endpoint(
+                        response.id, DEFAULT_EXECD_PORT, config.use_server_proxy
+                    )
+                )
+                egress_service = factory.create_network_policy_service(response.id)
+            else:
+                execd_endpoint, egress_endpoint = await _gather_fail_fast(
+                    budget.endpoint(lambda: sandbox_service.get_sandbox_endpoint(
+                        response.id, DEFAULT_EXECD_PORT, config.use_server_proxy
+                    )),
+                    budget.endpoint(lambda: sandbox_service.get_sandbox_endpoint(
+                        response.id, DEFAULT_EGRESS_PORT, config.use_server_proxy
+                    )),
+                )
+                # The server is authoritative about the runtime backing: for
+                # fsb- prefixed sandboxes it reports `template` even when the
+                # create used a snapshotId (a restore boots the template's
+                # published artifact set). Such sandboxes have no sidecar,
+                # so the egress service is swapped for the control-plane
+                # adapter and the fetched sidecar endpoint goes unused.
+                origin = execd_endpoint.origin or origin
+                if origin == SandboxOrigin.TEMPLATE:
+                    logger.info(
+                        "server reported origin=template for %s; routing "
+                        "egress policy through the lifecycle control plane",
+                        response.id,
+                    )
+                    egress_service = factory.create_network_policy_service(
+                        response.id
+                    )
+                else:
+                    egress_service = factory.create_egress_service(egress_endpoint)
 
             sandbox = cls(
                 sandbox_id=response.id,
@@ -619,13 +779,14 @@ class Sandbox:
                 command_service=factory.create_command_service(execd_endpoint),
                 health_service=factory.create_health_service(execd_endpoint),
                 metrics_service=factory.create_metrics_service(execd_endpoint),
-                egress_service=factory.create_egress_service(egress_endpoint),
+                egress_service=egress_service,
                 diagnostics_service=factory.create_diagnostics_service(),
                 isolated_service=factory.create_isolated_session_service(
                     execd_endpoint
                 ),
                 connection_config=config,
                 custom_health_check=health_check,
+                origin=origin,
             )
 
             if not skip_health_check:
@@ -720,9 +881,17 @@ class Sandbox:
             execd_endpoint = await budget.endpoint(lambda: sandbox_service.get_sandbox_endpoint(
                 sandbox_id, DEFAULT_EXECD_PORT, config.use_server_proxy
             ))
-            egress_endpoint = await budget.endpoint(lambda: sandbox_service.get_sandbox_endpoint(
-                sandbox_id, DEFAULT_EGRESS_PORT, config.use_server_proxy
-            ))
+            origin = execd_endpoint.origin or SandboxOrigin.UNKNOWN
+            if origin == SandboxOrigin.TEMPLATE:
+                # Template-backed (fsb) sandboxes have no sandbox-side egress
+                # sidecar: policy operations go through the lifecycle control
+                # plane, and the egress sidecar endpoint is never resolved.
+                egress_service = factory.create_network_policy_service(sandbox_id)
+            else:
+                egress_endpoint = await budget.endpoint(lambda: sandbox_service.get_sandbox_endpoint(
+                    sandbox_id, DEFAULT_EGRESS_PORT, config.use_server_proxy
+                ))
+                egress_service = factory.create_egress_service(egress_endpoint)
 
             sandbox = cls(
                 sandbox_id=sandbox_id,
@@ -731,13 +900,14 @@ class Sandbox:
                 command_service=factory.create_command_service(execd_endpoint),
                 health_service=factory.create_health_service(execd_endpoint),
                 metrics_service=factory.create_metrics_service(execd_endpoint),
-                egress_service=factory.create_egress_service(egress_endpoint),
+                egress_service=egress_service,
                 diagnostics_service=factory.create_diagnostics_service(),
                 isolated_service=factory.create_isolated_session_service(
                     execd_endpoint
                 ),
                 connection_config=config,
                 custom_health_check=health_check,
+                origin=origin,
             )
 
             if not skip_health_check:
@@ -799,9 +969,17 @@ class Sandbox:
             execd_endpoint = await budget.endpoint(lambda: sandbox_service.get_sandbox_endpoint(
                 sandbox_id, DEFAULT_EXECD_PORT, config.use_server_proxy
             ))
-            egress_endpoint = await budget.endpoint(lambda: sandbox_service.get_sandbox_endpoint(
-                sandbox_id, DEFAULT_EGRESS_PORT, config.use_server_proxy
-            ))
+            origin = execd_endpoint.origin or SandboxOrigin.UNKNOWN
+            if origin == SandboxOrigin.TEMPLATE:
+                # Template-backed (fsb) sandboxes have no sandbox-side egress
+                # sidecar: policy operations go through the lifecycle control
+                # plane, and the egress sidecar endpoint is never resolved.
+                egress_service = factory.create_network_policy_service(sandbox_id)
+            else:
+                egress_endpoint = await budget.endpoint(lambda: sandbox_service.get_sandbox_endpoint(
+                    sandbox_id, DEFAULT_EGRESS_PORT, config.use_server_proxy
+                ))
+                egress_service = factory.create_egress_service(egress_endpoint)
 
             sandbox = cls(
                 sandbox_id=sandbox_id,
@@ -810,13 +988,14 @@ class Sandbox:
                 command_service=factory.create_command_service(execd_endpoint),
                 health_service=factory.create_health_service(execd_endpoint),
                 metrics_service=factory.create_metrics_service(execd_endpoint),
-                egress_service=factory.create_egress_service(egress_endpoint),
+                egress_service=egress_service,
                 diagnostics_service=factory.create_diagnostics_service(),
                 isolated_service=factory.create_isolated_session_service(
                     execd_endpoint
                 ),
                 connection_config=config,
                 custom_health_check=health_check,
+                origin=origin,
             )
 
             if not skip_health_check:

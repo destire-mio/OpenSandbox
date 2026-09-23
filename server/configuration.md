@@ -128,6 +128,7 @@ Configuration for the server-side reverse-proxy routes.
 | `sandbox_binds` | string[] | `[]` | Host bind mounts applied to **every** sandbox container, Docker `-v` syntax (`host:container[:mode]`); prepended to binds derived from a request's `volumes`. |
 | `port_range_min` | integer | `40000` | Lower bound of the host port range used by bridge-mode sandbox port allocation. Must be less than `port_range_max`. Each sandbox needs 2–3 host ports (2 without egress, 3 with egress sidecar). Narrow this range to match your firewall policy — e.g., 100 concurrent sandboxes ≈ 300 ports. |
 | `port_range_max` | integer | `60000` | Upper bound of the host port range. Range must span ≥ 100 ports for reliable allocation. |
+| `publish_host` | string | `"0.0.0.0"` | The host **address** Docker publishes bridge-mode sandbox ports on (the `HostIp` of every port binding, the egress sidecar's included). `0.0.0.0` publishes on every interface of the host. Set an IP to keep sandbox ports (execd, the sandbox HTTP port, the egress API) off public interfaces: `127.0.0.1` when the server runs on the host, or the Docker bridge gateway (e.g. `172.17.0.1`) when the server runs in a container and reaches sandboxes through host-published ports (`host_ip` / `eip` then name that same address for clients). Must be an IPv4 address, not a name (the port probe is IPv4-only). |
 
 ---
 
@@ -138,6 +139,7 @@ If `runtime.type = "kubernetes"` and the `[kubernetes]` table is absent, the ser
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `kubeconfig_path` | string \| omitted | `null` | Path to kubeconfig (expandable, e.g. `~/.kube/config`). In-cluster configs often leave this unset and rely on in-cluster credentials. |
+| `insecure_skip_tls_verify` | boolean | `false` | Skip TLS verification for the Kubernetes API server. Temporary workaround only when in-cluster ServiceAccount CA does not match the apiserver certificate; disable once cluster CA is fixed. |
 | `namespace` | string \| omitted | `null` | Namespace for sandbox workloads. |
 | `workload_provider` | string \| omitted | `null` | One of: **`batchsandbox`**, **`agent-sandbox`**. If omitted, the **first registered** provider is used (currently **`batchsandbox`**). |
 | `batchsandbox_template_file` | string \| omitted | `null` | Path to **BatchSandbox** CR YAML template when `workload_provider = "batchsandbox"`. |
@@ -145,8 +147,6 @@ If `runtime.type = "kubernetes"` and the `[kubernetes]` table is absent, the ser
 | `sandbox_create_timeout_seconds` | integer | `60` | Max time to wait for a new sandbox to become ready (e.g. IP assigned), in seconds. |
 | `pool_acquisition_timeout_seconds` | integer | `30` | Max cumulative time to wait while Pool capacity prevents allocation. This does not extend `sandbox_create_timeout_seconds`. |
 | `sandbox_create_poll_interval_seconds` | float | `1.0` | Poll interval while waiting for readiness. |
-| `snapshot_create_timeout_seconds` | integer | `900` | Max time to wait for a Kubernetes public snapshot to become ready, in seconds. Set this greater than the controller snapshot `commitJobTimeout` / `--commit-job-timeout`. |
-| `informer_enabled` | boolean | `true` | **[Beta]** Use informer/watch cache for reads to reduce API load. |
 | `informer_resync_seconds` | integer | `300` | **[Beta]** Full resync period for the informer cache. |
 | `informer_watch_timeout_seconds` | integer | `60` | **[Beta]** Watch stream restart interval. |
 | `read_qps` | float | `0` | K8s API **get/list** rate limit (QPS). **0** = unlimited. |
@@ -357,7 +357,7 @@ snapshot_recovery_interval_seconds = 15
 export OPENSANDBOX_STORE_POSTGRESQL_DSN='postgresql://opensandbox:password@postgres:5432/opensandbox?sslmode=require'
 ```
 
-For Kubernetes configuration, see [Kubernetes Deployment](../docs/kubernetes/deployment.md#use-postgresql-for-server-persistence).
+For Kubernetes configuration, see [Kubernetes Deployment](../docs/deployment/index.md#use-postgresql-for-server-persistence).
 
 ---
 

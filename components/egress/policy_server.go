@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -50,6 +50,7 @@ type policyUpdater interface {
 type nftApplier interface {
 	ApplyStatic(context.Context, *policy.NetworkPolicy) error
 	AddResolvedDomain(context.Context, string, []nftables.ResolvedIP) error
+	AddUpstreamProxyIPs(context.Context, []nftables.ResolvedIP) error
 	StartConnectionRefresh(context.Context)
 	StartDomainRefresh(context.Context, func(context.Context, string) ([]nftables.ResolvedIP, error))
 	RemoveEnforcement(context.Context) error
@@ -67,7 +68,7 @@ func startPolicyServer(
 	policyFile string,
 	alwaysDeny, alwaysAllow []policy.EgressRule,
 	mitmGate *mitmproxy.HealthGate,
-) (*http.Server, error) {
+) (*http.Server, *policyServer, error) {
 	maxEgressRules := maxEgressRulesFromEnv()
 	if maxEgressRules > 0 {
 		log.Infof("policy API: max egress rules per policy (POST/PATCH) = %d (set %s=0 to disable)", maxEgressRules, constants.EnvMaxEgressRules)
@@ -109,11 +110,11 @@ func startPolicyServer(
 		socketPath := envOrDefault(constants.EnvCredentialProxySocket, constants.DefaultCredentialProxySocket)
 		_, mitmGID, _, err := mitmproxy.LookupUser(mitmproxy.RunAsUser)
 		if err != nil {
-			return nil, fmt.Errorf("lookup credential proxy user %q: %w", mitmproxy.RunAsUser, err)
+			return nil, nil, fmt.Errorf("lookup credential proxy user %q: %w", mitmproxy.RunAsUser, err)
 		}
 		activeSrv, cleanupActiveSocket, err = credentialvault.StartActiveSocketServerRequestAware(handler.handleCredentialVaultActive, socketPath, int(mitmGID))
 		if err != nil {
-			return nil, fmt.Errorf("credential vault active socket: %w", err)
+			return nil, nil, fmt.Errorf("credential vault active socket: %w", err)
 		}
 		log.Infof("credential vault active API listening on unix socket %s", socketPath)
 	}
@@ -151,7 +152,7 @@ func startPolicyServer(
 			}
 			cancel()
 		}
-		return nil, err
+		return nil, nil, err
 	case <-time.After(200 * time.Millisecond):
 		handler.startAlwaysRuleReloadJob()
 		safego.Go(func() {
@@ -159,7 +160,7 @@ func startPolicyServer(
 				log.Errorf("policy server error: %v", err)
 			}
 		})
-		return srv, nil
+		return srv, handler, nil
 	}
 }
 
@@ -215,6 +216,11 @@ func (s *policyServer) handlePolicy(w http.ResponseWriter, r *http.Request) {
 func (s *policyServer) handleCredentialVault(w http.ResponseWriter, r *http.Request) {
 	if !s.authorize(r) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime)) &&
+		(r.Method == http.MethodPost || r.Method == http.MethodPatch || r.Method == http.MethodDelete) {
+		http.Error(w, "credential vault writes are unavailable while the experimental revision runtime is enabled", http.StatusServiceUnavailable)
 		return
 	}
 	switch r.Method {

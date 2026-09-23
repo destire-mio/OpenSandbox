@@ -35,6 +35,72 @@ E2E suite:
 ../../scripts/python-e2e.sh
 ```
 
+### Fast-sandbox (fsb) integration env
+
+`tests/test_fsb_e2e.py` converts the HTTP verify stages of
+`scripts/fast-sandbox-env/integration-env.sh` (template create → gateway
+ping → networkpolicy PATCH/DELETE convergence, lifecycle ops, pause/resume,
+public snapshot round trip) into Python SDK calls. It is skipped unless the
+fsb stack is up and `OPENSANDBOX_TEST_FSB_TEMPLATE_ID` points at the
+golden-image template the env script builds, and it is excluded from the
+default `make test` run:
+
+```bash
+./scripts/fast-sandbox-env/integration-env.sh up     # brings up the stack, prints/keeps the template id
+cd tests/python
+OPENSANDBOX_TEST_FSB_TEMPLATE_ID="$(cat "$WORK/template-id")" make test-fsb
+```
+
+#### Covered SDK surface
+
+Template management (`SandboxManager`):
+
+- [x] `create_template` — async build asserted Pending → Succeeded + manifestRef
+- [x] `get_template`
+- [x] `list_templates` — metadata filter (percent-encoded values)
+- [x] `delete_template` — followed by a 404 re-read
+
+Sandbox lifecycle (`SandboxManager` + `Sandbox`):
+
+- [x] `Sandbox.create_from_template` — with `networkPolicy` + `metadata`; readiness via the signed gateway route
+- [x] `Sandbox.create(snapshot_id=...)` — restore with the pool resource profile; server-reported `origin=template` routes egress through the control plane
+- [x] `Sandbox.resume` — re-resolves endpoints, reads `OPEN-SANDBOX-ORIGIN`
+- [x] `Sandbox.connect` — re-attach to a running sandbox; origin auto-detected from the server header; execd + policy operations served through the re-attached instance
+- [x] `sandbox.pause` → `Paused` (durable-first window)
+- [x] `sandbox.kill` (+ deletion re-read)
+- [x] `SandboxManager.get_sandbox_info` / `list_sandbox_infos` / `patch_sandbox_metadata` (upsert + null delete) / `renew_sandbox`
+- [x] `sandbox.origin` — template vs unknown, server header reconciliation
+
+Snapshot management (`SandboxManager`):
+
+- [x] `create_snapshot` — 202 + Creating; re-entry fence (409 or accepted → terminal)
+- [x] `get_snapshot` — poll to Ready
+- [x] `list_snapshots` — `sandboxId`-scoped, both rows Ready
+- [x] `delete_snapshot`
+
+Execd plane (`Sandbox` properties, exercised on template sandboxes):
+
+- [x] `sandbox.commands.run` — stdout assertions + egress probes (`wget`)
+- [x] `sandbox.files.write_file` / `read_file` — write/read round trip
+- [x] `sandbox.get_metrics` — cpu/memory value ranges
+- [x] `sandbox.is_healthy` — post-resume / post-restore
+
+Egress policy (`Sandbox`):
+
+- [x] `get_egress_policy` — convergence polling
+- [x] `patch_egress_rules` — merge semantics verified **at HTTP level** (newly allowed target serves HTTPS)
+- [x] `delete_egress_rules` — removal verified **at HTTP level** (deleted target stops resolving/serving)
+- [x] policy persistence across pause/resume and after snapshot restore
+
+State fidelity:
+
+- [x] pause/resume: regular file, RAM-backed tmpfs file (`/dev/shm`), continuous guest uptime (same-VM resume, not a reboot)
+- [x] snapshot restore: pre-snapshot file present in the restored guest
+
+Not covered here (needs a different stack or out of scope): credential
+vault (fsb has no egress sidecar), execd background/isolated-session
+APIs, signed endpoint expiry.
+
 ### Foreground command stream completion
 
 ```bash

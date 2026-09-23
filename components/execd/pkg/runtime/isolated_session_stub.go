@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -57,6 +57,9 @@ func (r *IsolatedRunner) StopGC() {}
 
 // Close is a no-op on platforms without isolated-session support.
 func (r *IsolatedRunner) Close() error { return nil }
+
+// Reset is a no-op on platforms without isolated-session support.
+func (r *IsolatedRunner) Reset() error { return nil }
 
 // Available reports false on Windows.
 func (r *IsolatedRunner) Available() bool { return false }
