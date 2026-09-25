@@ -256,7 +256,7 @@ internal class CommandsAdapter(
             return executeStreamingRequest(
                 httpRequest = httpRequest,
                 handlers = request.handlers,
-                inferExitCode = !request.background,
+                isBackground = request.background,
                 failureMessage = { statusCode, errorBody ->
                     "Failed to run commands. Status code: $statusCode, Body: $errorBody"
                 },
@@ -374,7 +374,7 @@ internal class CommandsAdapter(
             return executeStreamingRequest(
                 httpRequest = httpRequest,
                 handlers = request.handlers,
-                inferExitCode = true,
+                isBackground = false,
                 failureMessage = { statusCode, errorBody ->
                     "run_in_session failed. Status: $statusCode, Body: $errorBody"
                 },
@@ -400,7 +400,7 @@ internal class CommandsAdapter(
     private fun executeStreamingRequest(
         httpRequest: Request,
         handlers: ExecutionHandlers?,
-        inferExitCode: Boolean,
+        isBackground: Boolean,
         failureMessage: (Int, String?) -> String,
     ): Execution {
         val execution = Execution()
@@ -410,19 +410,19 @@ internal class CommandsAdapter(
 
             response.body?.byteStream()?.bufferedReader(Charsets.UTF_8)?.use { reader ->
                 val dispatcher = ExecutionEventDispatcher(execution, handlers)
-                reader.lineSequence().forEach { line ->
-                    decodeEventLine(line)?.let { eventNode ->
-                        try {
-                            dispatcher.dispatch(eventNode)
-                        } catch (e: Exception) {
-                            logger.error("Failed to dispatch SSE event: {}", eventNode, e)
-                        }
+                for (line in reader.lineSequence()) {
+                    val eventNode = decodeEventLine(line) ?: continue
+                    try {
+                        dispatcher.dispatch(eventNode)
+                    } catch (e: Exception) {
+                        logger.error("Failed to dispatch SSE event: {}", eventNode, e)
                     }
+                    if (isBackground && eventNode.type == "execution_complete") break
                 }
             }
         }
 
-        if (inferExitCode) {
+        if (!isBackground) {
             execution.exitCode = inferForegroundExitCode(execution)
         }
         return execution

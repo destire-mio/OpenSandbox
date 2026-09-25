@@ -19,9 +19,10 @@ Abstract workload provider interface for Kubernetes resources.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Any, Optional
+from typing import Callable, Dict, List, Any, Optional
 
 from opensandbox_server.api.schema import Endpoint, ImageSpec, NetworkPolicy, PlatformSpec, Volume
+from opensandbox_server.config import EgressUpstreamProxyConfig
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,7 @@ class EgressWorkloadSettings:
     resource_requests: Optional[Dict[str, str]]
     resource_limits: Optional[Dict[str, str]]
     otlp_endpoint: Optional[str] = None
+    upstream_proxy: Optional[EgressUpstreamProxyConfig] = None
 
 
 class WorkloadProvider(ABC):
@@ -94,6 +96,12 @@ class WorkloadProvider(ABC):
         """
         pass
     
+    def subscribe_workload(
+        self, sandbox_id: str, namespace: str, callback: Callable[[str, Dict[str, Any]], None]
+    ) -> Optional[Callable[[], None]]:
+        """Return an unsubscribe callback, or None to use periodic checks only."""
+        return None
+
     @abstractmethod
     def get_workload(self, sandbox_id: str, namespace: str) -> Optional[Any]:
         """

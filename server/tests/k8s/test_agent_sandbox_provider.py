@@ -530,6 +530,189 @@ spec:
         assert result["reason"] == "SandboxReady"
         assert result["message"] == "Ready"
 
+    def test_get_status_suspended_condition_true_maps_to_paused(self):
+        provider = AgentSandboxProvider(MagicMock())
+        workload = {
+            "spec": {"operatingMode": "Suspended"},
+            "status": {
+                "conditions": [
+                    {
+                        "type": "Suspended",
+                        "status": "True",
+                        "reason": "PodTerminated",
+                        "message": "Sandbox pod has been terminated",
+                        "lastTransitionTime": "2025-12-31T10:05:00Z",
+                    },
+                    {
+                        "type": "Ready",
+                        "status": "False",
+                        "reason": "NotReady",
+                        "message": "Sandbox is suspended",
+                        "lastTransitionTime": "2025-12-31T10:00:00Z",
+                    },
+                ]
+            },
+            "metadata": {"creationTimestamp": "2025-12-31T09:00:00Z"},
+        }
+
+        result = provider.get_status(workload)
+
+        assert result["state"] == "Paused"
+        assert result["reason"] == "PodTerminated"
+        assert result["message"] == "Sandbox pod has been terminated"
+        assert result["last_transition_at"] == "2025-12-31T10:05:00Z"
+
+    def test_get_status_suspended_true_with_running_mode_maps_to_resuming(self):
+        provider = AgentSandboxProvider(MagicMock())
+        workload = {
+            "spec": {"operatingMode": "Running"},
+            "status": {
+                "conditions": [
+                    {
+                        "type": "Suspended",
+                        "status": "True",
+                        "reason": "PodTerminated",
+                        "message": "Sandbox pod has been terminated",
+                        "lastTransitionTime": "2025-12-31T10:05:00Z",
+                    }
+                ]
+            },
+            "metadata": {"creationTimestamp": "2025-12-31T09:00:00Z"},
+        }
+
+        result = provider.get_status(workload)
+
+        assert result["state"] == "Resuming"
+        assert result["message"] == "Sandbox is resuming"
+
+    def test_get_status_expired_outranks_suspended_condition(self):
+        provider = AgentSandboxProvider(MagicMock())
+        workload = {
+            "spec": {"operatingMode": "Suspended"},
+            "status": {
+                "conditions": [
+                    {
+                        "type": "Suspended",
+                        "status": "True",
+                        "reason": "PodTerminated",
+                        "message": "Sandbox pod has been terminated",
+                        "lastTransitionTime": "2025-12-31T10:05:00Z",
+                    },
+                    {
+                        "type": "Ready",
+                        "status": "False",
+                        "reason": "SandboxExpired",
+                        "message": "Sandbox has expired",
+                        "lastTransitionTime": "2025-12-31T11:00:00Z",
+                    },
+                ]
+            },
+            "metadata": {"creationTimestamp": "2025-12-31T09:00:00Z"},
+        }
+
+        result = provider.get_status(workload)
+
+        assert result["state"] == "Terminated"
+        assert result["reason"] == "SandboxExpired"
+
+    def test_get_status_suspended_condition_takes_precedence_over_ready_true(self):
+        provider = AgentSandboxProvider(MagicMock())
+        workload = {
+            "spec": {"operatingMode": "Suspended"},
+            "status": {
+                "conditions": [
+                    {
+                        "type": "Ready",
+                        "status": "True",
+                        "reason": "SandboxReady",
+                        "message": "Ready",
+                        "lastTransitionTime": "2025-12-31T10:00:00Z",
+                    },
+                    {
+                        "type": "Suspended",
+                        "status": "True",
+                        "reason": "PodTerminated",
+                        "message": "Sandbox pod has been terminated",
+                        "lastTransitionTime": "2025-12-31T10:05:00Z",
+                    },
+                ]
+            },
+            "metadata": {"creationTimestamp": "2025-12-31T09:00:00Z"},
+        }
+
+        result = provider.get_status(workload)
+
+        assert result["state"] == "Paused"
+
+    def test_get_status_operating_mode_suspended_condition_not_true_maps_to_pausing(self):
+        provider = AgentSandboxProvider(MagicMock())
+        workload = {
+            "spec": {"operatingMode": "Suspended"},
+            "status": {
+                "conditions": [
+                    {
+                        "type": "Suspended",
+                        "status": "False",
+                        "reason": "PodTerminating",
+                        "message": "Sandbox pod is terminating",
+                        "lastTransitionTime": "2025-12-31T10:05:00Z",
+                    }
+                ]
+            },
+            "metadata": {"creationTimestamp": "2025-12-31T09:00:00Z"},
+        }
+
+        result = provider.get_status(workload)
+
+        assert result["state"] == "Pausing"
+        assert result["reason"] == "PodTerminating"
+        assert result["message"] == "Sandbox pod is terminating"
+        assert result["last_transition_at"] == "2025-12-31T10:05:00Z"
+
+    def test_get_status_operating_mode_suspended_without_condition_maps_to_pausing(self):
+        provider = AgentSandboxProvider(MagicMock())
+        workload = {
+            "spec": {"operatingMode": "Suspended"},
+            "status": {"conditions": []},
+            "metadata": {"creationTimestamp": "2025-12-31T09:00:00Z"},
+        }
+
+        result = provider.get_status(workload)
+
+        assert result["state"] == "Pausing"
+        assert result["reason"] is None
+        assert result["message"] == "Pausing sandbox"
+
+    def test_get_status_operating_mode_running_with_suspended_false_uses_ready_mapping(self):
+        provider = AgentSandboxProvider(MagicMock())
+        workload = {
+            "spec": {"operatingMode": "Running"},
+            "status": {
+                "conditions": [
+                    {
+                        "type": "Suspended",
+                        "status": "False",
+                        "reason": "NotSuspended",
+                        "message": "",
+                        "lastTransitionTime": "2025-12-31T09:30:00Z",
+                    },
+                    {
+                        "type": "Ready",
+                        "status": "True",
+                        "reason": "SandboxReady",
+                        "message": "Ready",
+                        "lastTransitionTime": "2025-12-31T10:00:00Z",
+                    },
+                ]
+            },
+            "metadata": {"creationTimestamp": "2025-12-31T09:00:00Z"},
+        }
+
+        result = provider.get_status(workload)
+
+        assert result["state"] == "Running"
+        assert result["reason"] == "SandboxReady"
+
     def test_get_status_expired_condition(self):
         provider = AgentSandboxProvider(MagicMock())
         workload = {
@@ -849,6 +1032,212 @@ spec:
 
         assert endpoint.endpoint == "svc.example.com:9000"
         assert endpoint.headers is None
+
+    # ===== Pause / Resume Tests =====
+
+    def _running_sandbox(self) -> dict:
+        return {
+            "metadata": {"name": "test-id", "namespace": "test-ns"},
+            "spec": {"operatingMode": "Running"},
+            "status": {
+                "conditions": [
+                    {
+                        "type": "Ready",
+                        "status": "True",
+                        "reason": "SandboxReady",
+                        "message": "Ready",
+                        "lastTransitionTime": "2025-12-31T10:00:00Z",
+                    }
+                ]
+            },
+        }
+
+    def _paused_sandbox(self) -> dict:
+        return {
+            "metadata": {"name": "test-id", "namespace": "test-ns"},
+            "spec": {"operatingMode": "Suspended"},
+            "status": {
+                "conditions": [
+                    {
+                        "type": "Suspended",
+                        "status": "True",
+                        "reason": "PodTerminated",
+                        "message": "Sandbox pod has been terminated",
+                        "lastTransitionTime": "2025-12-31T10:05:00Z",
+                    }
+                ]
+            },
+        }
+
+    def _pausing_sandbox(self) -> dict:
+        return {
+            "metadata": {"name": "test-id", "namespace": "test-ns"},
+            "spec": {"operatingMode": "Suspended"},
+            "status": {
+                "conditions": [
+                    {
+                        "type": "Suspended",
+                        "status": "False",
+                        "reason": "PodTerminating",
+                        "message": "Sandbox pod is terminating",
+                        "lastTransitionTime": "2025-12-31T10:05:00Z",
+                    }
+                ]
+            },
+        }
+
+    def _pending_sandbox(self) -> dict:
+        return {
+            "metadata": {"name": "test-id", "namespace": "test-ns"},
+            "spec": {"operatingMode": "Running"},
+            "status": {"conditions": []},
+        }
+
+    def test_pause_sandbox_running_allows(self, mock_k8s_client):
+        """Pause allowed when Ready=True; patches spec.operatingMode=Suspended."""
+        provider = AgentSandboxProvider(mock_k8s_client)
+        mock_k8s_client.get_custom_object.return_value = self._running_sandbox()
+        mock_k8s_client.patch_custom_object.return_value = {}
+
+        provider.pause_sandbox("test-id", "test-ns")
+
+        mock_k8s_client.patch_custom_object.assert_called_once()
+        call_kwargs = mock_k8s_client.patch_custom_object.call_args.kwargs
+        assert call_kwargs["group"] == "agents.x-k8s.io"
+        assert call_kwargs["version"] == "v1beta1"
+        assert call_kwargs["plural"] == "sandboxes"
+        assert call_kwargs["name"] == "test-id"
+        assert call_kwargs["body"] == {"spec": {"operatingMode": "Suspended"}}
+
+    def test_pause_sandbox_already_paused_rejects(self, mock_k8s_client):
+        """Pause rejected when the sandbox is already paused."""
+        provider = AgentSandboxProvider(mock_k8s_client)
+        mock_k8s_client.get_custom_object.return_value = self._paused_sandbox()
+
+        with pytest.raises(ValueError, match="already paused"):
+            provider.pause_sandbox("test-id", "test-ns")
+
+        mock_k8s_client.patch_custom_object.assert_not_called()
+
+    def test_pause_sandbox_pausing_rejects(self, mock_k8s_client):
+        """Pause rejected while the suspend operation is in progress."""
+        provider = AgentSandboxProvider(mock_k8s_client)
+        mock_k8s_client.get_custom_object.return_value = self._pausing_sandbox()
+
+        with pytest.raises(ValueError, match="operation in progress"):
+            provider.pause_sandbox("test-id", "test-ns")
+
+        mock_k8s_client.patch_custom_object.assert_not_called()
+
+    def test_pause_sandbox_pending_rejects(self, mock_k8s_client):
+        """Pause rejected with the public state name when not Running."""
+        provider = AgentSandboxProvider(mock_k8s_client)
+        mock_k8s_client.get_custom_object.return_value = self._pending_sandbox()
+
+        with pytest.raises(ValueError) as exc_info:
+            provider.pause_sandbox("test-id", "test-ns")
+
+        assert str(exc_info.value) == "Cannot pause sandbox in state Pending, expected Running"
+        mock_k8s_client.patch_custom_object.assert_not_called()
+
+    def test_pause_sandbox_terminated_rejects(self, mock_k8s_client):
+        """Pause rejected with the public state name when Terminated."""
+        provider = AgentSandboxProvider(mock_k8s_client)
+        mock_k8s_client.get_custom_object.return_value = {
+            "metadata": {"name": "test-id", "namespace": "test-ns"},
+            "spec": {"operatingMode": "Running"},
+            "status": {
+                "conditions": [
+                    {
+                        "type": "Ready",
+                        "status": "False",
+                        "reason": "SandboxExpired",
+                        "message": "Expired",
+                        "lastTransitionTime": "2025-12-31T10:00:00Z",
+                    }
+                ]
+            },
+        }
+
+        with pytest.raises(ValueError, match="state Terminated"):
+            provider.pause_sandbox("test-id", "test-ns")
+
+    def test_pause_sandbox_not_found(self, mock_k8s_client):
+        """Pause raises ValueError with 'not found' so the service maps it to 404."""
+        provider = AgentSandboxProvider(mock_k8s_client)
+        mock_k8s_client.get_custom_object.return_value = None
+
+        with pytest.raises(ValueError, match="not found"):
+            provider.pause_sandbox("test-id", "test-ns")
+
+    def test_pause_patch_after_delete_maps_to_not_found(self, mock_k8s_client):
+        """Patch 404 (CR deleted since the read) maps to the public not-found error."""
+        provider = AgentSandboxProvider(mock_k8s_client)
+        mock_k8s_client.get_custom_object.return_value = self._running_sandbox()
+        mock_k8s_client.patch_custom_object.side_effect = ApiException(status=404)
+
+        with pytest.raises(ValueError, match="not found"):
+            provider.pause_sandbox("test-id", "test-ns")
+
+    def test_resume_sandbox_paused_allows(self, mock_k8s_client):
+        """Resume allowed when the sandbox is paused; patches spec.operatingMode=Running."""
+        provider = AgentSandboxProvider(mock_k8s_client)
+        mock_k8s_client.get_custom_object.return_value = self._paused_sandbox()
+        mock_k8s_client.patch_custom_object.return_value = {}
+
+        provider.resume_sandbox("test-id", "test-ns")
+
+        mock_k8s_client.patch_custom_object.assert_called_once()
+        call_kwargs = mock_k8s_client.patch_custom_object.call_args.kwargs
+        assert call_kwargs["group"] == "agents.x-k8s.io"
+        assert call_kwargs["version"] == "v1beta1"
+        assert call_kwargs["plural"] == "sandboxes"
+        assert call_kwargs["name"] == "test-id"
+        assert call_kwargs["body"] == {"spec": {"operatingMode": "Running"}}
+
+    def test_resume_sandbox_running_rejects(self, mock_k8s_client):
+        """Resume rejected when the sandbox is running."""
+        provider = AgentSandboxProvider(mock_k8s_client)
+        mock_k8s_client.get_custom_object.return_value = self._running_sandbox()
+
+        with pytest.raises(ValueError) as exc_info:
+            provider.resume_sandbox("test-id", "test-ns")
+
+        assert str(exc_info.value) == "Cannot resume sandbox in state Running, expected Paused"
+        mock_k8s_client.patch_custom_object.assert_not_called()
+
+    def test_resume_sandbox_pausing_rejects(self, mock_k8s_client):
+        """Resume rejected while the suspend operation is in progress."""
+        provider = AgentSandboxProvider(mock_k8s_client)
+        mock_k8s_client.get_custom_object.return_value = self._pausing_sandbox()
+
+        with pytest.raises(ValueError, match="operation in progress"):
+            provider.resume_sandbox("test-id", "test-ns")
+
+    def test_resume_sandbox_pending_rejects(self, mock_k8s_client):
+        """Resume rejected with the public state name when not Paused."""
+        provider = AgentSandboxProvider(mock_k8s_client)
+        mock_k8s_client.get_custom_object.return_value = self._pending_sandbox()
+
+        with pytest.raises(ValueError, match="state Pending"):
+            provider.resume_sandbox("test-id", "test-ns")
+
+    def test_resume_sandbox_not_found(self, mock_k8s_client):
+        """Resume raises ValueError with 'not found' so the service maps it to 404."""
+        provider = AgentSandboxProvider(mock_k8s_client)
+        mock_k8s_client.get_custom_object.return_value = None
+
+        with pytest.raises(ValueError, match="not found"):
+            provider.resume_sandbox("test-id", "test-ns")
+
+    def test_resume_patch_after_delete_maps_to_not_found(self, mock_k8s_client):
+        """Patch 404 (CR deleted since the read) maps to the public not-found error."""
+        provider = AgentSandboxProvider(mock_k8s_client)
+        mock_k8s_client.get_custom_object.return_value = self._paused_sandbox()
+        mock_k8s_client.patch_custom_object.side_effect = ApiException(status=404)
+
+        with pytest.raises(ValueError, match="not found"):
+            provider.resume_sandbox("test-id", "test-ns")
 
 
     # ===== Image Auth / Pull Secrets Tests =====

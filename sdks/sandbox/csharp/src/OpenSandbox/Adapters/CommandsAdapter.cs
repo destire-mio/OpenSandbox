@@ -240,7 +240,7 @@ internal sealed class CommandsAdapter : IExecdCommands, IExecutionOperations
     {
         return ConsumeExecutionAsync(
             RunStreamAsync(argv, options, cancellationToken), handlers,
-            inferExitCode: !(options?.Background ?? false), cancellationToken);
+            isBackground: options?.Background ?? false, cancellationToken);
     }
 
     public async Task<Execution> RunAsync(
@@ -253,7 +253,7 @@ internal sealed class CommandsAdapter : IExecdCommands, IExecutionOperations
         return await ConsumeExecutionAsync(
             RunStreamAsync(command, options, cancellationToken),
             handlers,
-            inferExitCode: !(options?.Background ?? false),
+            isBackground: options?.Background ?? false,
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -327,7 +327,7 @@ internal sealed class CommandsAdapter : IExecdCommands, IExecutionOperations
         return await ConsumeExecutionAsync(
             RunInSessionStreamAsync(sessionId, command, options, cancellationToken),
             handlers,
-            inferExitCode: true,
+            isBackground: false,
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -484,7 +484,7 @@ internal sealed class CommandsAdapter : IExecdCommands, IExecutionOperations
     private async Task<Execution> ConsumeExecutionAsync(
         IAsyncEnumerable<ServerStreamEvent> stream,
         ExecutionHandlers? handlers,
-        bool inferExitCode,
+        bool isBackground,
         CancellationToken cancellationToken)
     {
         var execution = new Execution();
@@ -494,9 +494,11 @@ internal sealed class CommandsAdapter : IExecdCommands, IExecutionOperations
         {
             PreserveLegacyInitId(ev, execution);
             await dispatcher.DispatchAsync(ev).ConfigureAwait(false);
+            if (isBackground && ev.Type == ServerStreamEventTypes.ExecutionComplete)
+                break;
         }
 
-        if (inferExitCode)
+        if (!isBackground)
         {
             execution.ExitCode = InferForegroundExitCode(execution);
         }
