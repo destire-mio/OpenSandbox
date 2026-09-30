@@ -30,6 +30,7 @@ import com.alibaba.opensandbox.sandbox.api.models.execd.CreatePTYOperationReques
 import com.alibaba.opensandbox.sandbox.api.models.execd.EventNode
 import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxException
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxInternalException
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.CommandLogs
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.CommandStatus
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution
@@ -61,6 +62,53 @@ import java.util.concurrent.TimeUnit
 import com.alibaba.opensandbox.sandbox.api.models.execd.CreateSessionRequest as CreateSessionRequestApi
 import com.alibaba.opensandbox.sandbox.api.models.execd.ExecutionOperation as ApiExecutionOperation
 import com.alibaba.opensandbox.sandbox.api.models.execd.RunInSessionRequest as RunInSessionRequestApi
+
+/** Quotes a string as a single POSIX shell word. */
+private fun shellQuote(value: String): String = "'${value.replace("'", "'\\''")}'"
+
+private val ENV_KEY_REGEX = Regex("^[A-Za-z_][A-Za-z0-9_]*\\z")
+
+/** Escapes a value for the runtime env file's double-quoted form. */
+private fun escapeDoubleQuoted(value: String): String =
+    value
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+
+/**
+ * Builds the sandbox-side snippet that appends KEY=VALUE to the env file named
+ * by the sandbox's EXECD_ENVS variable. Values without a single quote use the
+ * runtime env file's lossless single-quoted form; otherwise the double-quoted
+ * form is used (shell-style `$NAME` sequences in such values may be expanded
+ * when the runtime loads the file).
+ */
+private fun buildSetEnvCommand(
+    key: String,
+    value: String,
+): String {
+    if (!ENV_KEY_REGEX.matches(key)) {
+        throw InvalidArgumentException("setEnv key must match [A-Za-z_][A-Za-z0-9_]*, got '$key'")
+    }
+    if (value.contains('\u0000')) {
+        throw InvalidArgumentException("setEnv value cannot contain NUL bytes")
+    }
+    val entry =
+        if (value.contains('\'')) {
+            "$key=\"${escapeDoubleQuoted(value)}\""
+        } else {
+            "$key='$value'"
+        }
+    return listOf(
+        "if [ -z \"\${EXECD_ENVS:-}\" ]; then " +
+            "printf '%s\\n' " +
+            "'EXECD_ENVS is not set; cannot persist environment variable $key' " +
+            ">&2; exit 1; fi",
+        "mkdir -p \"\$(dirname \"\$EXECD_ENVS\")\"",
+        "printf '%s\\n' ${shellQuote(entry)} >> \"\$EXECD_ENVS\"",
+    ).joinToString("\n")
+}
 
 /**
  * Implementation of [Commands] that adapts OpenAPI-generated APIs and handles
@@ -267,6 +315,25 @@ internal class CommandsAdapter(
         }
     }
 
+    override fun setEnv(
+        key: String,
+        value: String,
+    ) {
+        val command = buildSetEnvCommand(key, value)
+        val execution = run(RunCommandRequest.builder().command(command).build())
+        // A foreground command only reports exitCode 0 after a confirmed
+        // execution_complete event; a missing exit code (e.g. a dropped
+        // stream) is treated as failure because the append was never confirmed.
+        val failed = execution.error != null || execution.exitCode != 0
+        if (failed) {
+            val stderr = execution.logs.stderr.joinToString("") { it.text }.trim()
+            val detail =
+                stderr.ifEmpty { execution.error?.value?.trim().orEmpty() }
+            val message = "commands.setEnv failed for '$key'" + if (detail.isNotEmpty()) ": $detail" else ""
+            throw SandboxInternalException(message)
+        }
+    }
+
     override fun interrupt(executionId: String) {
         try {
             commandApi.interruptCommand(executionId)
@@ -439,38 +506,10 @@ internal class CommandsAdapter(
         throw response.toSandboxApiException(message = failureMessage)
     }
 
-    private fun decodeEventLine(line: String): EventNode? {
-        if (line.isBlank()) {
-            return null
+    private fun decodeEventLine(line: String): EventNode? =
+        ExecdEventSupport.decodeEventLine(line) { failingLine, error ->
+            logger.error("Failed to parse SSE line: {}", failingLine, error)
         }
 
-        val payload =
-            when {
-                line.startsWith(":") -> return null
-                line.startsWith("event:") -> return null
-                line.startsWith("id:") -> return null
-                line.startsWith("retry:") -> return null
-                line.startsWith("data:") -> line.drop(5).trim()
-                else -> line
-            }
-
-        if (payload.isBlank()) {
-            return null
-        }
-
-        return try {
-            jsonParser.decodeFromString<EventNode>(payload)
-        } catch (e: Exception) {
-            logger.error("Failed to parse SSE line: {}", line, e)
-            null
-        }
-    }
-
-    private fun inferForegroundExitCode(execution: Execution): Int? {
-        return if (execution.error != null) {
-            execution.error?.value?.toIntOrNull()
-        } else {
-            if (execution.complete != null) 0 else null
-        }
-    }
+    private fun inferForegroundExitCode(execution: Execution): Int? = ExecdEventSupport.inferForegroundExitCode(execution)
 }

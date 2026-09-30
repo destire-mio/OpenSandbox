@@ -9,6 +9,10 @@ This section contains the OpenAPI specification documents for the OpenSandbox pr
 
 ## Specification Files
 
+Implementing an alternative backend or integrating a workload's own API? Read
+[Implementation compatibility](/api/implementation-compatibility) for the boundary
+between these contracts, the reference daemons, and current SDK expectations.
+
 ### 1. sandbox-lifecycle.yml
 
 [OpenAPI source](https://github.com/opensandbox-group/OpenSandbox/blob/main/specs/sandbox-lifecycle.yml)
@@ -37,7 +41,7 @@ Defines the complete lifecycle interfaces for creating, managing, and destroying
 - `GET /snapshots` - List snapshots with optional source sandbox, exact name, and state filtering plus pagination
 - `GET /snapshots/{snapshotId}` - Get snapshot state and metadata
 - `DELETE /snapshots/{snapshotId}` - Delete a snapshot
-- `POST /sandboxes/{sandboxId}/pause` - Pause a sandbox (asynchronous)
+- `POST /sandboxes/{sandboxId}/pause` - Pause a sandbox (asynchronous); returns `409 Conflict` if it is already paused
 - `POST /sandboxes/{sandboxId}/resume` - Resume a paused sandbox
 - `POST /sandboxes/{sandboxId}/renew-expiration` - Renew sandbox expiration (TTL)
 - `PATCH /sandboxes/{sandboxId}/metadata` - Patch sandbox metadata (JSON Merge Patch, RFC 7396)

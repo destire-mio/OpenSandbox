@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Upstream command protocol (including argv), without recovery methods:
+# Upstream command protocol (including argv and set_env), without recovery methods:
 # adding required recovery methods must fail this fixture.
 from datetime import timedelta
 from typing import Protocol
@@ -36,6 +36,8 @@ class LegacyCommands(Protocol):
         opts: RunCommandOpts | None = None,
         handlers: ExecutionHandlersSync | None = None,
     ) -> Execution: ...
+
+    def set_env(self, key: str, value: str) -> None: ...
 
     def interrupt(self, execution_id: str) -> None: ...
 

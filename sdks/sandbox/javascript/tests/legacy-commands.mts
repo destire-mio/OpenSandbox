@@ -14,7 +14,7 @@
 
 import type { ExecdCommands } from "../src/services/execdCommands.js";
 import { getExecutionOperations } from "../src/services/execdCommands.js";
-type Legacy = Pick<ExecdCommands, "runStream" | "run" | "interrupt" | "getCommandStatus" | "getBackgroundCommandLogs" | "createSession" | "runInSession" | "deleteSession">;
+type Legacy = Pick<ExecdCommands, "runStream" | "run" | "setEnv" | "interrupt" | "getCommandStatus" | "getBackgroundCommandLogs" | "createSession" | "runInSession" | "deleteSession">;
 declare const legacy: Legacy;
 const current: ExecdCommands = legacy;
 getExecutionOperations(current).getExecutionInstance();

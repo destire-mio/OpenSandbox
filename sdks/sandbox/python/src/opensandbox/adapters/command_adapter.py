@@ -22,20 +22,34 @@ synchronous and streaming execution modes with proper session management.
 """
 
 import asyncio
-import json
 import logging
 import time
 from datetime import timedelta
 
 import httpx
 
+from opensandbox.adapters.converter.command_execution import (
+    build_run_command_request_body as _build_run_command_request_body,
+)
+from opensandbox.adapters.converter.command_execution import (
+    build_run_in_session_request_body as _build_run_in_session_request_body,
+)
+from opensandbox.adapters.converter.command_execution import (
+    decode_sse_event_data as _decode_sse_event_data,
+)
+from opensandbox.adapters.converter.command_execution import (
+    infer_foreground_exit_code as _infer_foreground_exit_code,
+)
+from opensandbox.adapters.converter.command_execution import (
+    resolve_run_in_session_timeout as _resolve_run_in_session_timeout,
+)
 from opensandbox.adapters.converter.command_model_converter import to_command_status
-from opensandbox.adapters.converter.event_node import EventNode
+from opensandbox.adapters.converter.env_entry import (
+    build_set_env_command,
+    raise_for_set_env_failure,
+)
 from opensandbox.adapters.converter.exception_converter import (
     ExceptionConverter,
-)
-from opensandbox.adapters.converter.execution_converter import (
-    ExecutionConverter,
 )
 from opensandbox.adapters.converter.execution_event_dispatcher import (
     ExecutionEventDispatcher,
@@ -61,61 +75,6 @@ from opensandbox.services.command import Commands
 from opensandbox.transport import unwrap_retry_transport
 
 logger = logging.getLogger(__name__)
-
-
-def _resolve_run_in_session_timeout(timeout: timedelta | None) -> int | None:
-    if timeout is None:
-        return None
-    if isinstance(timeout, timedelta):
-        if timeout < timedelta(0):
-            raise InvalidArgumentException("timeout must be positive")
-        timeout_ms = int(timeout.total_seconds() * 1000)
-        return timeout_ms
-    raise InvalidArgumentException("timeout must be a datetime.timedelta or None")
-
-
-def _infer_foreground_exit_code(execution: Execution) -> int | None:
-    if execution.error is not None:
-        try:
-            return int(execution.error.value)
-        except (TypeError, ValueError):
-            return None
-    if execution.complete is not None:
-        return 0
-    return None
-
-
-def _build_run_command_request_body(command: str | list[str], opts: RunCommandOpts):
-    return ExecutionConverter.to_api_run_command_request(command, opts)
-
-
-def _build_run_in_session_request_body(
-    command: str,
-    working_directory: str | None,
-    timeout: int | None,
-):
-    from opensandbox.api.execd.models.run_in_session_request import (
-        RunInSessionRequest,
-    )
-    from opensandbox.api.execd.types import UNSET
-
-    return RunInSessionRequest(
-        command=command,
-        cwd=working_directory if working_directory else UNSET,
-        timeout=timeout if timeout is not None else UNSET,
-    )
-
-
-def _decode_sse_event_data(data: str) -> EventNode | None:
-    if not data.strip():
-        return None
-
-    try:
-        event_dict = json.loads(data)
-        return EventNode(**event_dict)
-    except Exception as e:
-        logger.error(f"Failed to parse SSE event data: {data}", exc_info=e)
-        return None
 
 
 class CommandsAdapter(Commands):
@@ -239,8 +198,8 @@ class CommandsAdapter(Commands):
                 if event_node is None:
                     continue
                 await dispatcher.dispatch(event_node)
-                # Foreground responses drain to EOF: older servers may emit
-                # trailing output after the completion event.
+                # Foreground responses drain to EOF (no break below): older
+                # servers may emit trailing output after the completion event.
                 if is_background and event_node.type == "execution_complete":
                     # Background commands are done once execution_complete
                     # arrives; do not wait for the chunked terminator, which
@@ -284,6 +243,16 @@ class CommandsAdapter(Commands):
         except Exception as e:
             logger.error("Failed to run command", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
+
+    async def set_env(self, key: str, value: str) -> None:
+        """Persist an environment variable for future commands and sessions."""
+        command = build_set_env_command(key, value)
+        try:
+            execution = await self.run(command)
+        except Exception as e:
+            logger.error("Failed to run command", exc_info=e)
+            raise ExceptionConverter.to_sandbox_exception(e) from e
+        raise_for_set_env_failure(key, execution)
 
     async def interrupt(self, execution_id: str) -> None:
         """Interrupt a running command execution."""
@@ -356,9 +325,8 @@ class CommandsAdapter(Commands):
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def create_session(self, *, working_directory: str | None = None) -> str:
-        from opensandbox.api.execd.api.command.create_session import (
-            asyncio as create_session_asyncio,
-        )
+        from opensandbox.adapters.converter.response_handler import require_parsed
+        from opensandbox.api.execd.api.command import create_session
         from opensandbox.api.execd.models.create_session_request import (
             CreateSessionRequest,
         )
@@ -372,19 +340,14 @@ class CommandsAdapter(Commands):
         )
         try:
             client = await self._get_client()
-            parsed = await create_session_asyncio(client=client, body=body)
-            if parsed is None:
-                raise SandboxApiException(
-                    message="create_session returned no body",
-                    status_code=0,
-                )
-            if isinstance(parsed, CreateSessionResponse):
-                return parsed.session_id
-            handle_api_error(parsed, "create_session")
-            raise SandboxApiException(
-                message="create_session unexpected response",
-                status_code=200,
+            response_obj = await create_session.asyncio_detailed(
+                client=client, body=body
             )
+            handle_api_error(response_obj, "create_session")
+            parsed = require_parsed(
+                response_obj, CreateSessionResponse, "create_session"
+            )
+            return parsed.session_id
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
@@ -423,15 +386,14 @@ class CommandsAdapter(Commands):
     async def delete_session(self, session_id: str) -> None:
         if not (session_id and session_id.strip()):
             raise InvalidArgumentException("session_id cannot be empty")
-        from opensandbox.api.execd.api.command.delete_session import (
-            asyncio as delete_session_asyncio,
-        )
+        from opensandbox.api.execd.api.command import delete_session
 
         try:
             client = await self._get_client()
-            parsed = await delete_session_asyncio(client=client, session_id=session_id)
-            if parsed is not None:
-                handle_api_error(parsed, "delete_session")
+            response_obj = await delete_session.asyncio_detailed(
+                client=client, session_id=session_id
+            )
+            handle_api_error(response_obj, "delete_session")
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
@@ -531,7 +493,7 @@ class CommandsAdapter(Commands):
         if not operation_id:
             raise InvalidArgumentException("operation_id is required")
         try:
-            body = ExecutionConverter.to_api_run_command_request(
+            body = _build_run_command_request_body(
                 command, opts or RunCommandOpts()
             )
             from opensandbox.api.execd.models import CreateCommandOperationRequest
